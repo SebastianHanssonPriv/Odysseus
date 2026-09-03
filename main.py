@@ -4,10 +4,10 @@ import argparse
 import json
 from datetime import date, datetime, timedelta, timezone
 
-from .activity_events import fetch_activity_events
-from .auth import PowerBITokenProvider
-from .config import load_settings
-from .powerbi_client import PowerBIAdminClient
+from activity_events import fetch_activity_events
+from auth import PowerBITokenProvider
+from config import load_settings
+from powerbi_client import PowerBIAdminClient
 
 
 def _parse_args() -> argparse.Namespace:

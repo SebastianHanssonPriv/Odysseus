@@ -6,7 +6,7 @@ import warnings
 from azure.core.credentials import AccessToken, TokenCredential
 from azure.identity import ClientSecretCredential, DefaultAzureCredential
 
-from .config import POWERBI_SCOPE, Settings
+from config import POWERBI_SCOPE, Settings
 
 
 class PowerBITokenProvider:
@@ -29,13 +29,10 @@ class PowerBITokenProvider:
             # .env are reused so only the secret needs typing.
             from secure_input import prompt_credentials
 
-            fields = []
-            if not settings.tenant_id:
-                fields.append(("tenant_id", "Tenant ID"))
-            if not settings.client_id:
-                fields.append(("client_id", "Client ID"))
-            fields.append(("client_secret", "Client secret"))
-            entered = prompt_credentials("Power BI credentials (development)", fields)
+            entered = prompt_credentials(
+                need_tenant=not settings.tenant_id,
+                need_client=not settings.client_id,
+            )
             if not entered:
                 raise SystemExit("Credential entry cancelled.")
             tenant = settings.tenant_id or entered["tenant_id"]

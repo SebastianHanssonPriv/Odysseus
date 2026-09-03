@@ -1,9 +1,3 @@
-"""Shared masked-credential dialog used by both the Power BI and Qlik auth
-modules (`powerbi/auth.py`, `qlik/auth.py`) for --interactive local
-development. One dialog implementation, reused with a different title and
-field list per platform, rather than duplicated per tool.
-"""
-
 from __future__ import annotations
 
 import tkinter as tk
@@ -38,10 +32,10 @@ class _CredentialDialog:
     disabled. Values are never written to disk or logged by this module.
     """
 
-    def __init__(self, title: str, fields: list[tuple[str, str]]):
+    def __init__(self, fields: list[tuple[str, str]]):
         self.result: dict[str, str] = {}
         self._root = tk.Tk()
-        self._root.title(title)
+        self._root.title("Power BI credentials (development)")
         self._root.resizable(False, False)
 
         tk.Label(
@@ -103,10 +97,15 @@ class _CredentialDialog:
         return self.result
 
 
-def prompt_credentials(title: str, fields: list[tuple[str, str]]) -> dict[str, str]:
+def prompt_credentials(need_tenant: bool, need_client: bool) -> dict[str, str]:
     """Open the secure dialog and return entered credentials (memory only).
 
-    `fields` is [(key, label), ...] in display order. Returns an empty dict
-    if the user cancels.
+    Returns an empty dict if the user cancels.
     """
-    return _CredentialDialog(title, fields).run()
+    fields: list[tuple[str, str]] = []
+    if need_tenant:
+        fields.append(("tenant_id", "Tenant ID"))
+    if need_client:
+        fields.append(("client_id", "Client ID"))
+    fields.append(("client_secret", "Client secret"))
+    return _CredentialDialog(fields).run()

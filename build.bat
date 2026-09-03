@@ -1,94 +1,78 @@
 @echo off
-REM Builds the Odysseus governance toolkit into a single standalone Windows
-REM .exe covering both platforms. Run this on a Windows machine that has
-REM Python 3 installed. The resulting dist\odysseus.exe runs without Python.
+REM ============================================================
+REM  Build BufabBIGovernanceStudio.exe   (run this on Windows)
+REM  Requires Python 3.9+ installed and on PATH.
+REM  One exe = Qlik governance + Power BI usage, one window.
+REM ============================================================
 
-setlocal enabledelayedexpansion
+REM Always run from the folder this .bat lives in
 cd /d "%~dp0"
 
-echo ============================================================
-echo  Building odysseus.exe
-echo ============================================================
+echo Working folder: %CD%
+echo.
 
-REM --- 1. Locate Python ---------------------------------------------------
-where py >nul 2>nul
-if %errorlevel%==0 (
-  set "PY=py -3"
-) else (
-  set "PY=python"
+if not exist "requirements.txt" (
+    echo ERROR: requirements.txt not found in this folder.
+    pause
+    exit /b 1
 )
-%PY% --version >nul 2>nul
-if errorlevel 1 (
-  echo ERROR: Python 3 was not found. Install it from https://www.python.org and re-run.
-  goto :error
+if not exist "studio_app.py" (
+    echo ERROR: studio_app.py not found in this folder.
+    pause
+    exit /b 1
 )
 
-REM --- 2. Isolated build environment --------------------------------------
-if not exist ".buildenv" (
-  echo Creating build environment...
-  %PY% -m venv .buildenv
-  if errorlevel 1 goto :error
-)
-call ".buildenv\Scripts\activate.bat"
-if errorlevel 1 goto :error
-
-REM --- 3. Dependencies + PyInstaller --------------------------------------
 echo Installing dependencies (first run takes a few minutes)...
-python -m pip install --upgrade pip >nul
-python -m pip install -r requirements.txt pyinstaller
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 if errorlevel 1 goto :error
 
-REM --- 4. Build -----------------------------------------------------------
-echo Building executable...
-pyinstaller --noconfirm --clean --onefile --console ^
-  --name odysseus ^
+echo.
+echo Building standalone executable...
+set ICON_OPT=
+set DATA_OPT=
+if exist "app_icon.ico" (
+    echo Using icon: app_icon.ico
+    set ICON_OPT=--icon app_icon.ico
+    set DATA_OPT=--add-data "app_icon.ico;."
+) else (
+    echo No app_icon.ico found - building with the default icon.
+)
+if exist "bufab_header.png" set DATA_OPT=%DATA_OPT% --add-data "bufab_header.png;."
+set VER_OPT=
+if exist "version_info.txt" (
+    echo Using version info: version_info.txt
+    set VER_OPT=--version-file version_info.txt
+) else (
+    echo No version_info.txt found - building without file details.
+)
+
+python -m PyInstaller --onefile --windowed --name BufabBIGovernanceStudio ^
+  %ICON_OPT% %VER_OPT% %DATA_OPT% ^
   --collect-all azure.identity ^
   --collect-all azure.keyvault.secrets ^
-  --collect-all websockets ^
-  --hidden-import secure_input ^
-  --hidden-import powerbi ^
-  --hidden-import powerbi.collector ^
-  --hidden-import powerbi.auth ^
-  --hidden-import powerbi.config ^
-  --hidden-import powerbi.powerbi_client ^
-  --hidden-import powerbi.activity_events ^
-  --hidden-import powerbi.raw_export ^
-  --hidden-import powerbi.analytics ^
-  --hidden-import powerbi.scanner ^
-  --hidden-import powerbi.dataflow_admin ^
-  --hidden-import powerbi.mashup_parser ^
-  --hidden-import powerbi.model_lineage ^
-  --hidden-import powerbi.model_lineage_collector ^
-  --hidden-import qlik ^
-  --hidden-import qlik.collector ^
-  --hidden-import qlik.auth ^
-  --hidden-import qlik.config ^
-  --hidden-import qlik.rest_client ^
-  --hidden-import qlik.engine_client ^
-  --hidden-import qlik.lineage ^
-  --hidden-import qlik.qvd_lineage ^
-  --hidden-import qlik.script_parser ^
-  cli.py
+  --hidden-import auth ^
+  --hidden-import config ^
+  --hidden-import powerbi_client ^
+  --hidden-import activity_events ^
+  --hidden-import raw_export ^
+  --hidden-import analytics ^
+  --hidden-import qlik_core ^
+  --hidden-import qlik_capacity ^
+  studio_app.py
 if errorlevel 1 goto :error
 
 echo.
 echo ============================================================
-echo  Done.  Your executable:  dist\odysseus.exe
+echo  Done!  Your program is here:
+echo     dist\BufabBIGovernanceStudio.exe
 echo ============================================================
-echo  Run it from a folder that holds your .env file, e.g.:
-echo     odysseus.exe powerbi collect --interactive
-echo     odysseus.exe powerbi raw-export
-echo     odysseus.exe powerbi analytics
-echo     odysseus.exe powerbi model-lineage --interactive
-echo     odysseus.exe qlik extract --interactive
-echo.
-goto :end
+echo You can double-click it - no Python needed on other PCs.
+pause
+exit /b 0
 
 :error
 echo.
-echo BUILD FAILED - see the messages above.
-endlocal
+echo Build FAILED. Check the messages above.
+pause
 exit /b 1
-
-:end
-endlocal

@@ -101,21 +101,37 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def run(data_dir: Path) -> None:
+def compute(data_dir: Path) -> dict:
+    """Load events and build the three usage frames once, returning them in a dict
+    (so both run() and the desktop dashboard share one computation, no double-load).
+
+    Keys: views, report_usage_daily, user_report_usage, user_daily_usage.
+    Raises SystemExit if there are no events / no view events to aggregate.
+    """
     events = _normalize(_load_events(data_dir))
     views = events[events["operation"].isin(VIEW_OPERATIONS)].dropna(
         subset=["user", "timestamp"]
     )
     if views.empty:
         raise SystemExit("No view events found to aggregate.")
+    return {
+        "views": views,
+        "report_usage_daily": report_usage_daily(views),
+        "user_report_usage": user_report_usage(views),
+        "user_daily_usage": user_daily_usage(views),
+    }
+
+
+def run(data_dir: Path) -> None:
+    frames = compute(data_dir)
 
     out_dir = data_dir / "analytics"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     outputs = {
-        "report_usage_daily.csv": report_usage_daily(views),
-        "user_report_usage.csv": user_report_usage(views),
-        "user_daily_usage.csv": user_daily_usage(views),
+        "report_usage_daily.csv": frames["report_usage_daily"],
+        "user_report_usage.csv": frames["user_report_usage"],
+        "user_daily_usage.csv": frames["user_daily_usage"],
     }
     for name, frame in outputs.items():
         frame.to_csv(out_dir / name, index=False, encoding="utf-8-sig")
