@@ -161,10 +161,17 @@ _NO_EXPRESSION_NOTE = (
     "the tenant setting 'Enhance admin APIs responses with DAX and mashup "
     "expressions' is not enabled in Admin portal -> Tenant settings."
 )
+_NO_TABLES_NOTE = (
+    "Scanner API returned this dataset with an empty/missing 'tables' list (no "
+    "per-table detail at all, not even a name without M code). Most likely "
+    "cause: the tenant setting 'Enhance admin APIs responses with detailed "
+    "metadata' is not enabled in Admin portal -> Tenant settings, or is not "
+    "enabled for this service principal's security group specifically."
+)
 
 # Statuses whose row gets a warning tint in the Excel report.
 _BAD_STATUSES = {"unresolved", "no_expression_available", "dataflow_export_failed",
-                 "dataflow_entity_not_found"}
+                 "dataflow_entity_not_found", "dataset_has_no_tables"}
 _WARN_STATUSES = {"dataflow_reference_incomplete", "max_hops_exceeded", "multiple_direct_sources"}
 
 
@@ -178,6 +185,7 @@ def scan_model_lineage(client, scan_timeout_seconds=600, cancel_check=None, log=
     workspace_ids = list(list_workspace_ids(client))
     results = []
     batch_errors = 0
+    tally = {"datasets": 0, "reports": 0, "dataflows": 0, "dashboards": 0}
 
     for workspace in scan_workspaces(client, workspace_ids, scan_timeout_seconds):
         if cancel_check and cancel_check():
@@ -187,10 +195,27 @@ def scan_model_lineage(client, scan_timeout_seconds=600, cancel_check=None, log=
             batch_errors += 1
             log(f"  scan batch error: {workspace['scan_batch_error']}")
             continue
+        for key in tally:
+            tally[key] += len(workspace.get(key) or [])
         results.extend(_resolve_workspace_datasets(workspace, dataflow_cache, log))
 
+    real_tables = [r for r in results if r["status"] != "dataset_has_no_tables"]
     log(f"Scanned {len(workspace_ids)} workspace(s) ({batch_errors} batch error(s)), "
-        f"resolved {len(results)} table(s).")
+        f"resolved {len(real_tables)} table(s) across {len(results) - len(real_tables)} "
+        f"dataset(s) with no table detail.")
+    if not real_tables:
+        all_empty = tally["datasets"] == tally["reports"] == tally["dataflows"] == tally["dashboards"] == 0
+        log(f"  Diagnostic: across all scanned workspaces the Scanner API returned "
+            f"{tally['datasets']} dataset(s), {tally['reports']} report(s), "
+            f"{tally['dataflows']} dataflow(s), {tally['dashboards']} dashboard(s). " +
+            ("All zero -> the service principal likely cannot see workspace content at all "
+             "(check it is in the Power BI admin security group and 'Allow service principals "
+             "to use read-only admin APIs' is enabled for that group)."
+             if all_empty else
+             "Datasets/reports/dataflows are present but every dataset came back with an "
+             "empty 'tables' list -> almost certainly the tenant setting 'Enhance admin APIs "
+             "responses with detailed metadata' is not enabled for this service principal's "
+             "security group (Admin portal -> Tenant settings)."))
     return results
 
 
@@ -203,6 +228,13 @@ def _resolve_workspace_datasets(workspace, dataflow_cache, log):
         dataset_id = dataset.get("id", "")
         dataset_name = dataset.get("name", "")
         tables = dataset.get("tables", [])
+        if not tables:
+            results.append(asdict(TableSourceResult(
+                workspace_id=workspace_id, workspace_name=workspace_name,
+                dataset_id=dataset_id, dataset_name=dataset_name, table_name="",
+                status="dataset_has_no_tables", note=_NO_TABLES_NOTE,
+            )))
+            continue
         dataset_siblings = _dataset_sibling_expressions(tables)
 
         for table in tables:
