@@ -1,0 +1,6 @@
+requests>=2.31
+azure-identity>=1.16
+azure-keyvault-secrets>=4.8
+python-dotenv>=1.0
+pandas>=2.0
+pyarrow>=14.0

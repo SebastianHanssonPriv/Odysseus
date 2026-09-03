@@ -1,0 +1,5 @@
+requests>=2.31
+websockets>=12.0
+azure-identity>=1.16
+azure-keyvault-secrets>=4.8
+python-dotenv>=1.0
