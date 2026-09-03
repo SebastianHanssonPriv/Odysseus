@@ -44,6 +44,7 @@ class QlikView(QWidget):
     sig_error = Signal(str, str)
     sig_fields_loaded = Signal(list)
     sig_trace_done = Signal(str, str)
+    sig_qvd_usage_done = Signal(str)
     sig_index_built = Signal(int, object)
     sig_capacity_result = Signal(object)
     sig_consistency_result = Signal(object)
@@ -67,6 +68,7 @@ class QlikView(QWidget):
         self.sig_error.connect(lambda t, m: QMessageBox.critical(self, t, m))
         self.sig_fields_loaded.connect(self._on_fields_loaded)
         self.sig_trace_done.connect(self._on_trace_done)
+        self.sig_qvd_usage_done.connect(self._on_qvd_usage_text)
         self.sig_index_built.connect(self._on_index_built)
         self.sig_capacity_result.connect(self._render_capacity)
         self.sig_consistency_result.connect(self._render_consistency)
@@ -364,6 +366,21 @@ class QlikView(QWidget):
         ll.setContentsMargins(0, 10, 0, 0)
         lc = make_card()
         lcl = QVBoxLayout(lc)
+        lcl.addWidget(label("QVD FIELD USAGE REPORT  (for each selected app: which QVDs it reads, "
+                            "and which fields in them are confirmed present in the final data model)",
+                            "section"))
+        lcl.addWidget(label("Select one or more apps above, then click 'Scan QVD field usage'. Writes "
+                            "one combined Excel workbook (qvd_field_usage_*.xlsx) and shows a summary "
+                            "below - treat 'not found' fields as a prioritized worklist, not a verdict.",
+                            "muted", wrap=True))
+        qrow = QHBoxLayout()
+        self.btn_qvd_usage = QPushButton("Scan QVD field usage")
+        self.btn_qvd_usage.setObjectName("accent")
+        self.btn_qvd_usage.clicked.connect(self._on_qvd_usage)
+        qrow.addWidget(self.btn_qvd_usage)
+        qrow.addStretch(1)
+        lcl.addLayout(qrow)
+
         lcl.addWidget(label("FIELD LINEAGE  (the pipeline a field took INTO this app)", "section"))
         lcl.addWidget(label("Select exactly ONE app above, click 'Load fields', pick a field, then 'Trace'.",
                             "muted", wrap=True))
@@ -647,6 +664,8 @@ class QlikView(QWidget):
             self.btn_load_fields.setEnabled(True)
         elif which == "lineage":
             self.btn_trace.setEnabled(True)
+        elif which == "qvd_usage":
+            self.btn_qvd_usage.setEnabled(True)
         elif which == "index":
             self.btn_index.setEnabled(True)
 
@@ -1207,6 +1226,65 @@ class QlikView(QWidget):
             self.log("DRY RUN complete - nothing was written." if dry else "Apply finished.")
         finally:
             self.sig_done.emit("apply")
+
+    # ---------------- QVD field usage report ----------------
+    def _on_qvd_usage_text(self, text):
+        self.lineage_panel.setPlainText(text)
+
+    def _on_qvd_usage(self):
+        if self._need_settings():
+            return
+        if not self.output_dir:
+            QMessageBox.warning(self, "Missing settings", "Set an output folder in Settings.")
+            return
+        targets = self._selected_targets()
+        if not targets:
+            QMessageBox.warning(self, "Select apps", "Select one or more apps in the list to scan.")
+            return
+        self.btn_qvd_usage.setEnabled(False)
+        self.shell.busy_begin("Scanning QVD field usage")
+        self.log(f"Scanning QVD field usage for {len(targets)} app(s) ...")
+        threading.Thread(target=self._qvd_usage_worker,
+                         args=(self.tenant, self.api_key, self.output_dir, targets), daemon=True).start()
+
+    def _qvd_usage_worker(self, tenant, key, out_dir, targets):
+        app_rows = []
+        try:
+            for a in targets:
+                if self.shell.cancel_requested():
+                    self.log("QVD field usage scan cancelled.")
+                    break
+                exp = core.QlikExporter(tenant, key, a["guid"], out_dir, self.shell.sig_log.emit)
+                try:
+                    exp.connect()
+                    app_h = exp.call(-1, "OpenDoc", [a["guid"]])["qReturn"]["qHandle"]
+                    title = exp.call(app_h, "GetAppLayout", [])["qLayout"].get("qTitle", a["guid"])
+                    script = exp.fetch_script(app_h)
+                    model_fields = exp.fetch_model_fields(app_h)
+                    tables = core.parse_load_tables(script)
+                    rows = core.analyze_qvd_field_usage(tables, model_fields)
+                    app_rows.append({"title": title, "guid": a["guid"], "rows": rows})
+                    qvds = {r["qvd_file"] for r in rows}
+                    self.log(f"  {title}: {len(qvds)} QVD source(s), {len(rows)} field reference(s)")
+                except Exception as e:
+                    self.log(f"ERROR scanning {a.get('name', a['guid'])}: {scrub(key, e)}")
+                finally:
+                    exp.close()
+            if self.shell.cancel_requested():
+                self.log("QVD field usage scan cancelled - no report written.")
+                return
+            if not app_rows:
+                self.log("No apps scanned.")
+                return
+            text = core.render_qvd_field_usage_text(app_rows)
+            self.sig_qvd_usage_done.emit(text)
+            out_path = core.write_qvd_usage_report(app_rows, out_dir, self.shell.sig_log.emit)
+            self.log(f"QVD field usage report -> {os.path.basename(out_path)}")
+        except Exception as e:
+            self.log(f"ERROR: {scrub(key, e)}")
+            self.sig_error.emit("QVD field usage scan failed", scrub(key, e))
+        finally:
+            self.sig_done.emit("qvd_usage")
 
     # ---------------- field lineage ----------------
     def _on_fields_loaded(self, names):

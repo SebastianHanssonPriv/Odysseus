@@ -60,6 +60,20 @@ charts, colour-coded action list) **and** writes `capacity_report_*.xlsx`.
 *Apply master items* is the only write path — Dry run is on by default, a backup
 is exported first, and a confirmation dialog appears before any real write.
 
+The **Field lineage** tab has two independent tools:
+- **QVD field usage report** — batch mode: for every selected app, scans the
+  load script's QVD-sourced LOAD statements and cross-checks every field
+  against the live data model, so you can see, per app, which source QVDs
+  and which fields in them are actually confirmed used in the final model
+  (vs. loaded but dropped, joined away, or not found under that name). Writes
+  one combined `qvd_field_usage_*.xlsx` and shows a summary in the panel
+  below — treat "not found" fields as a prioritized worklist, not a verdict,
+  since this is a text-level script scan (see the workbook's warning sheet
+  for exactly what it does not evaluate).
+- **Field lineage (trace)** — interactive mode: pick one app and one field to
+  see the pipeline that field took *into* this app, optionally extended
+  upstream across apps via Qlik's own lineage graph.
+
 ## 4. Power BI workspace
 - **Collect** — pick a UTC **date range** (From / To, defaults to the last 7 days
   up to yesterday) and pull each day. Days already collected are skipped, so

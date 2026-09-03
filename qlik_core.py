@@ -1894,6 +1894,242 @@ def _origin_kind_label(t):
     return "Source", t["source"] or t["label"]
 
 
+
+# ============================================================
+#  QVD field usage (batch: for each app, which QVD fields land in the model)
+# ============================================================
+# Statuses, most to least confident:
+#   confirmed                  found under its final name in the live model,
+#                               in the table this LOAD resolved to.
+#   confirmed_case_mismatch    found only via a case-insensitive match.
+#   found_in_other_table       a field with this name exists in the model,
+#                               but not associated with this LOAD's resolved
+#                               table - likely joined away, renamed by a
+#                               construct this scan does not track, or the
+#                               table-name resolution below missed something.
+#   not_found_in_final_model   not present under this name anywhere in the
+#                               live model - likely dropped or renamed.
+#   wildcard_unresolved        LOAD * FROM ... (qvd) - the QVD is confirmed
+#                               read, but its field list is not resolvable
+#                               from script text alone.
+QVD_CONFIRMED_STATUSES = {"confirmed", "confirmed_case_mismatch"}
+
+
+def _implicit_table_name(t):
+    """Qlik names an unlabeled LOAD's table after its own FROM source (e.g. a
+    QVD's file name without extension) rather than leaving it anonymous.
+    parse_load_tables does not know this - it assigns a plain '(table #n)'
+    placeholder when no label/JOIN/CONCATENATE target was found in the script
+    text - so recover Qlik's real implicit name here for matching against the
+    live model. Best-effort: for a source that lists more than one file (e.g.
+    a wildcard path pulling many QVDs into one table) this picks the first
+    file alphabetically, which may not be the name Qlik actually used."""
+    label = t.get("label") or ""
+    if not label.startswith("(table #"):
+        return label
+    files = sorted(t.get("files") or [])
+    if files:
+        return os.path.splitext(files[0])[0]
+    return label
+
+
+def analyze_qvd_field_usage(tables, model_fields):
+    """For each QVD-sourced table in a parsed load script, check whether each
+    loaded field is confirmed present (under its final name) in the live data
+    model. tables: parse_load_tables(script) result. model_fields:
+    QlikExporter.fetch_model_fields(app_h) result - 'src_tables' there comes
+    from the engine's own FieldList, i.e. the ground truth for which table a
+    field actually lives in today, independent of how this scan resolved the
+    script's table names.
+
+    Only tables read from a .qvd file are considered (kind == 'from' with at
+    least one file ending in .qvd); a table can list other files too (e.g. a
+    wildcard folder load), so each qvd basename found is reported separately.
+
+    Returns a list of dicts: qvd_file, target_table, source_field,
+    final_field, passthrough (bool - straight column rename vs. a computed
+    expression), status (see QVD_CONFIRMED_STATUSES / module docstring above
+    this function)."""
+    by_name, by_name_lc = {}, {}
+    for f in model_fields:
+        name = f.get("name", "")
+        by_name.setdefault(name, []).append(f)
+        by_name_lc.setdefault(name.lower(), []).append(f)
+
+    rows = []
+    for t in tables:
+        if t.get("kind") != "from":
+            continue
+        qvds = sorted(b for b in (t.get("files") or set()) if b.lower().endswith(".qvd"))
+        if not qvds:
+            continue
+        target_table = _implicit_table_name(t)
+        if t.get("wildcard"):
+            for qvd in qvds:
+                rows.append({
+                    "qvd_file": qvd, "target_table": target_table,
+                    "source_field": "*", "final_field": "*",
+                    "passthrough": False, "status": "wildcard_unresolved",
+                })
+            continue
+        for fld in t.get("out_fields") or []:
+            out_name = fld.get("out") or ""
+            if not out_name:
+                continue
+            in_name = fld.get("in")
+            status = _resolve_qvd_field_status(out_name, target_table, by_name, by_name_lc)
+            for qvd in qvds:
+                rows.append({
+                    "qvd_file": qvd, "target_table": target_table,
+                    "source_field": in_name or out_name, "final_field": out_name,
+                    "passthrough": in_name is not None, "status": status,
+                })
+    return rows
+
+
+def _resolve_qvd_field_status(out_name, target_table, by_name, by_name_lc):
+    tt = (target_table or "").lower()
+    matches = by_name.get(out_name)
+    if matches:
+        if any(tt in {s.lower() for s in (m.get("src_tables") or [])} for m in matches):
+            return "confirmed"
+        return "found_in_other_table"
+    matches_lc = by_name_lc.get(out_name.lower())
+    if matches_lc:
+        if any(tt in {s.lower() for s in (m.get("src_tables") or [])} for m in matches_lc):
+            return "confirmed_case_mismatch"
+        return "found_in_other_table"
+    return "not_found_in_final_model"
+
+
+def render_qvd_field_usage_text(app_rows):
+    """app_rows: [{'title':, 'guid':, 'rows': analyze_qvd_field_usage(...) result}, ...]."""
+    total_fields = sum(len(ar["rows"]) for ar in app_rows)
+    lines = [f"QVD FIELD USAGE - {len(app_rows)} app(s), {total_fields} field reference(s) scanned", ""]
+    for ar in app_rows:
+        rows = ar["rows"]
+        if not rows:
+            lines.append(f"{ar['title']}: no QVD-sourced LOAD statements found in the script.")
+            lines.append("")
+            continue
+        qvds = sorted({r["qvd_file"] for r in rows})
+        confirmed = sum(1 for r in rows if r["status"] in QVD_CONFIRMED_STATUSES)
+        not_found = [r for r in rows if r["status"] == "not_found_in_final_model"]
+        other = [r for r in rows if r["status"] == "found_in_other_table"]
+        wild = [r for r in rows if r["status"] == "wildcard_unresolved"]
+        lines.append(f"{ar['title']}  ({len(qvds)} QVD source(s), {len(rows)} field reference(s))")
+        for qvd in qvds:
+            lines.append(f"    - {qvd}")
+        lines.append(f"    confirmed: {confirmed}   not found: {len(not_found)}   "
+                     f"found in a different table: {len(other)}   wildcard (unresolved): {len(wild)}")
+        for r in not_found[:20]:
+            lines.append(f"      NOT FOUND: {r['final_field']}  (from {r['qvd_file']} -> {r['target_table']})")
+        if len(not_found) > 20:
+            lines.append(f"      ... and {len(not_found) - 20} more - see the Excel report.")
+        lines.append("")
+    lines.append("Full detail, including every confirmed field, is in the Excel report.")
+    return "\n".join(lines)
+
+
+def write_qvd_usage_report(app_rows, out_dir, log):
+    """Combined QVD field-usage workbook across every app scanned in one run.
+    app_rows: [{'title':, 'guid':, 'rows': analyze_qvd_field_usage(...) result}, ...]."""
+    os.makedirs(out_dir, exist_ok=True)
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    base = f"qvd_field_usage_{stamp}"
+
+    all_rows, summary_rows = [], []
+    for ar in app_rows:
+        rows = ar["rows"]
+        confirmed = sum(1 for r in rows if r["status"] in QVD_CONFIRMED_STATUSES)
+        not_found = sum(1 for r in rows if r["status"] == "not_found_in_final_model")
+        other = sum(1 for r in rows if r["status"] == "found_in_other_table")
+        wild = sum(1 for r in rows if r["status"] == "wildcard_unresolved")
+        summary_rows.append([ar["title"], len({r["qvd_file"] for r in rows}),
+                             len(rows), confirmed, not_found, other, wild])
+        for r in rows:
+            all_rows.append([ar["title"], r["qvd_file"], r["target_table"],
+                             r["source_field"], r["final_field"],
+                             "Passthrough" if r["passthrough"] else "Expression",
+                             r["status"]])
+
+    warn = ("READ FIRST - this is a best-effort text-level scan of the load script, not a full "
+            "Qlik parser: control-flow blocks (IF/FOR/SUB), $(variable) FROM paths, and RENAME "
+            "FIELDS USING table-driven renames are not evaluated, and an unlabeled table's implicit "
+            "name is guessed from its own source file. 'Not found in final model' means the field "
+            "was not seen under this name in the live model - verify before treating it as unused.")
+
+    summary_headers = ["App", "QVD files", "Fields scanned", "Confirmed", "Not found in model",
+                       "Found in a different table", "Wildcard (unresolved)"]
+    detail_headers = ["App", "QVD file", "Target table", "Source field (in QVD)",
+                      "Final field (in model)", "Type", "Status"]
+
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from openpyxl.utils import get_column_letter
+    except Exception:
+        detail_path = os.path.join(out_dir, f"{base}.csv")
+        with open(detail_path, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            w.writerow(detail_headers)
+            w.writerows(all_rows)
+        log("openpyxl not installed - wrote a CSV file instead of a workbook.")
+        return detail_path
+
+    wb = Workbook()
+    head_font = Font(bold=True, color="FFFFFF")
+    head_fill = PatternFill("solid", fgColor="315C6D")
+    warn_font = Font(bold=True, color="B00020")
+    wrap = Alignment(wrap_text=True, vertical="top")
+    status_fill = {
+        "not_found_in_final_model": PatternFill("solid", fgColor="F7D9DE"),
+        "found_in_other_table": PatternFill("solid", fgColor="F7ECD2"),
+        "wildcard_unresolved": PatternFill("solid", fgColor="EFF2F3"),
+    }
+
+    ws = wb.active
+    ws.title = "Summary"
+    ws.append(["IMPORTANT - PLEASE READ"])
+    ws["A1"].font = warn_font
+    ws.append([warn])
+    ws.cell(row=ws.max_row, column=1).font = warn_font
+    ws.cell(row=ws.max_row, column=1).alignment = wrap
+    ws.append([])
+    ws.append(summary_headers)
+    hdr = ws.max_row
+    for c in range(1, len(summary_headers) + 1):
+        ws.cell(row=hdr, column=c).font = head_font
+        ws.cell(row=hdr, column=c).fill = head_fill
+    for r in summary_rows:
+        ws.append(r)
+    ws.column_dimensions["A"].width = 40
+    for col in ("B", "C", "D", "E", "F", "G"):
+        ws.column_dimensions[col].width = 16
+
+    ds = wb.create_sheet("QVD field usage")
+    ds.append(detail_headers)
+    for c in range(1, len(detail_headers) + 1):
+        ds.cell(row=1, column=c).font = head_font
+        ds.cell(row=1, column=c).fill = head_fill
+    for r in all_rows:
+        rn = ds.max_row + 1
+        ds.append(r)
+        fill = status_fill.get(r[-1])
+        if fill:
+            for c in range(1, len(detail_headers) + 1):
+                ds.cell(row=rn, column=c).fill = fill
+    for i, w in enumerate((26, 26, 20, 22, 22, 14, 24), 1):
+        ds.column_dimensions[get_column_letter(i)].width = w
+    if all_rows:
+        ds.freeze_panes = "A2"
+        ds.auto_filter.ref = f"A1:{get_column_letter(len(detail_headers))}{ds.max_row}"
+
+    out_path = os.path.join(out_dir, f"{base}.xlsx")
+    wb.save(out_path)
+    return out_path
+
+
 def trace_field_pipeline(field_name, tables):
     """Follow a field back through the load script to its origin in THIS app.
     Returns {field, found, steps:[...], origin, external_sources:set, note}.
