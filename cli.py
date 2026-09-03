@@ -4,6 +4,7 @@ Two platforms, one program:
     odysseus powerbi collect --interactive
     odysseus powerbi raw-export
     odysseus powerbi analytics
+    odysseus powerbi model-lineage --interactive
     odysseus qlik extract --interactive
 
 Heavy modules are imported lazily inside each branch so --help and argument
@@ -57,6 +58,26 @@ def build_parser() -> argparse.ArgumentParser:
     analytics = powerbi_cmd.add_parser("analytics", help="Build the exact usage aggregations.")
     analytics.add_argument("--data-dir", type=Path, default=None)
 
+    model_lineage = powerbi_cmd.add_parser(
+        "model-lineage",
+        help=(
+            "For every semantic model, resolve each table's source (a warehouse "
+            "table/view, direct or via a Gen1 dataflow) from its M code."
+        ),
+    )
+    model_lineage.add_argument("--data-dir", type=Path, default=None)
+    model_lineage.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Enter credentials in a secure masked window (local development).",
+    )
+    model_lineage.add_argument(
+        "--scan-timeout",
+        type=int,
+        default=600,
+        help="Seconds to wait for each Scanner API batch to finish (default: 600).",
+    )
+
     qlik = platform.add_parser("qlik", help="Qlik Cloud data-model lineage extraction.")
     qlik_cmd = qlik.add_subparsers(dest="command", required=True)
 
@@ -98,6 +119,15 @@ def main() -> None:
             from powerbi import analytics
 
             analytics.run(args.data_dir or _default_data_dir())
+
+        elif args.command == "model-lineage":
+            from powerbi import model_lineage_collector
+
+            model_lineage_collector.run(
+                args.data_dir or _default_data_dir(),
+                interactive=args.interactive,
+                scan_timeout_seconds=args.scan_timeout,
+            )
 
     elif args.platform == "qlik":
         if args.command == "extract":

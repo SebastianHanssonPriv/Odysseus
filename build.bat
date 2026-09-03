@@ -54,6 +54,11 @@ pyinstaller --noconfirm --clean --onefile --console ^
   --hidden-import powerbi.activity_events ^
   --hidden-import powerbi.raw_export ^
   --hidden-import powerbi.analytics ^
+  --hidden-import powerbi.scanner ^
+  --hidden-import powerbi.dataflow_admin ^
+  --hidden-import powerbi.mashup_parser ^
+  --hidden-import powerbi.model_lineage ^
+  --hidden-import powerbi.model_lineage_collector ^
   --hidden-import qlik ^
   --hidden-import qlik.collector ^
   --hidden-import qlik.auth ^
@@ -74,6 +79,7 @@ echo  Run it from a folder that holds your .env file, e.g.:
 echo     odysseus.exe powerbi collect --interactive
 echo     odysseus.exe powerbi raw-export
 echo     odysseus.exe powerbi analytics
+echo     odysseus.exe powerbi model-lineage --interactive
 echo     odysseus.exe qlik extract --interactive
 echo.
 goto :end

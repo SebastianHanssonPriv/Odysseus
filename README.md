@@ -9,6 +9,7 @@ instead of being reused.
 odysseus powerbi collect --interactive
 odysseus powerbi raw-export
 odysseus powerbi analytics
+odysseus powerbi model-lineage --interactive
 odysseus qlik extract --interactive
 ```
 
@@ -28,7 +29,7 @@ PyInstaller — no Python required to run it afterward.
 
 | Package | Platform | Purpose |
 |---|---|---|
-| [`powerbi/`](powerbi/) | Power BI | Collects tenant activity events daily (Power BI Admin API retains only ~28 days) and accumulates them into permanent JSONL storage; aggregates them into exact usage tables (report views, per-user/report/day rollups). |
+| [`powerbi/`](powerbi/) | Power BI | Collects tenant activity events daily (Power BI Admin API retains only ~28 days) and accumulates them into permanent JSONL storage; aggregates them into exact usage tables (report views, per-user/report/day rollups). `model-lineage` additionally resolves, for every semantic model, which warehouse table/view each table's data actually comes from — direct, or via a Gen1 dataflow — by parsing the M code the Scanner API and Dataflow export API return. See [`powerbi/README.md`](powerbi/README.md) for prerequisites and parser limitations. |
 | [`qlik/`](qlik/) | Qlik Cloud | Extracts each app's load script, lineage, and data-model tables/fields/keys via the Engine API, then cross-checks the script's own QVD LOAD statements against the real final model to report, per app, which source QVD fields are actually used. Built on a reusable Engine API connector (`qlik/engine_client.py`) other Qlik tools can import rather than reimplement. See [`qlik/README.md`](qlik/README.md) for the field-usage confidence tiers and parser limitations. |
 
 Each is a plain Python package under the shared `cli.py` entry point — no
