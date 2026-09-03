@@ -30,8 +30,8 @@ for exactly what the parser does and does not evaluate.
 
 from __future__ import annotations
 
-from engine_client import QixEngineSession
-from qvd_lineage import resolve_qvd_field_usage, usages_as_dicts
+from .engine_client import QixEngineSession
+from .qvd_lineage import resolve_qvd_field_usage, usages_as_dicts
 
 # Positional params for Doc.GetTablesAndKeys, in the API's documented order:
 # qWindowSize, qNullSize, qCellHeight, qSyntheticMode, qIncludeSysVars. The

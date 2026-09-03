@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
-from script_parser import LoadedField, QvdLoadStatement, parse_qvd_loads
+from .script_parser import LoadedField, QvdLoadStatement, parse_qvd_loads
 
 # Per-field resolution status, most to least confident:
 #   confirmed                 Simple pass-through field, found under its

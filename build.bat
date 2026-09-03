@@ -1,13 +1,13 @@
 @echo off
-REM Builds the Qlik lineage tool into a single standalone Windows .exe.
-REM Run this on a Windows machine that has Python 3 installed. The resulting
-REM dist\qlik-lineage.exe runs without Python.
+REM Builds the Odysseus governance toolkit into a single standalone Windows
+REM .exe covering both platforms. Run this on a Windows machine that has
+REM Python 3 installed. The resulting dist\odysseus.exe runs without Python.
 
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
 echo ============================================================
-echo  Building qlik-lineage.exe
+echo  Building odysseus.exe
 echo ============================================================
 
 REM --- 1. Locate Python ---------------------------------------------------
@@ -41,26 +41,40 @@ if errorlevel 1 goto :error
 REM --- 4. Build -----------------------------------------------------------
 echo Building executable...
 pyinstaller --noconfirm --clean --onefile --console ^
-  --name qlik-lineage ^
+  --name odysseus ^
   --collect-all azure.identity ^
   --collect-all azure.keyvault.secrets ^
   --collect-all websockets ^
-  --hidden-import collector ^
-  --hidden-import auth ^
-  --hidden-import config ^
-  --hidden-import rest_client ^
-  --hidden-import engine_client ^
-  --hidden-import lineage ^
   --hidden-import secure_input ^
+  --hidden-import powerbi ^
+  --hidden-import powerbi.collector ^
+  --hidden-import powerbi.auth ^
+  --hidden-import powerbi.config ^
+  --hidden-import powerbi.powerbi_client ^
+  --hidden-import powerbi.activity_events ^
+  --hidden-import powerbi.raw_export ^
+  --hidden-import powerbi.analytics ^
+  --hidden-import qlik ^
+  --hidden-import qlik.collector ^
+  --hidden-import qlik.auth ^
+  --hidden-import qlik.config ^
+  --hidden-import qlik.rest_client ^
+  --hidden-import qlik.engine_client ^
+  --hidden-import qlik.lineage ^
+  --hidden-import qlik.qvd_lineage ^
+  --hidden-import qlik.script_parser ^
   cli.py
 if errorlevel 1 goto :error
 
 echo.
 echo ============================================================
-echo  Done.  Your executable:  dist\qlik-lineage.exe
+echo  Done.  Your executable:  dist\odysseus.exe
 echo ============================================================
 echo  Run it from a folder that holds your .env file, e.g.:
-echo     qlik-lineage.exe extract --interactive
+echo     odysseus.exe powerbi collect --interactive
+echo     odysseus.exe powerbi raw-export
+echo     odysseus.exe powerbi analytics
+echo     odysseus.exe qlik extract --interactive
 echo.
 goto :end
 

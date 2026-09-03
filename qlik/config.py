@@ -31,8 +31,11 @@ class Settings:
 def load_settings(force_interactive: bool = False) -> Settings:
     tenant_url = os.environ.get("QLIK_TENANT_URL", "").strip().rstrip("/") or None
     client_id = os.environ.get("QLIK_OAUTH_CLIENT_ID", "").strip() or None
-    kv_url = os.environ.get("KEY_VAULT_URL", "").strip() or None
-    kv_secret_name = os.environ.get("KEY_VAULT_SECRET_NAME", "").strip() or None
+    # Prefixed (not the bare KEY_VAULT_URL/KEY_VAULT_SECRET_NAME) because this
+    # program also holds the Power BI tool, whose service-principal secret
+    # lives under a different secret name in the same or a different vault.
+    kv_url = os.environ.get("QLIK_KEY_VAULT_URL", "").strip() or None
+    kv_secret_name = os.environ.get("QLIK_KEY_VAULT_SECRET_NAME", "").strip() or None
     env_secret = os.environ.get("QLIK_OAUTH_CLIENT_SECRET", "").strip() or None
     scope = os.environ.get("QLIK_OAUTH_SCOPE", "").strip() or None
     declared_mode = os.environ.get("QLIK_AUTH_MODE", "").strip().lower() or None
@@ -54,7 +57,7 @@ def load_settings(force_interactive: bool = False) -> Settings:
     else:
         raise SystemExit(
             "No credential source configured. Use --interactive (local dev), or "
-            "set KEY_VAULT_URL + KEY_VAULT_SECRET_NAME (recommended), or "
+            "set QLIK_KEY_VAULT_URL + QLIK_KEY_VAULT_SECRET_NAME (recommended), or "
             "QLIK_OAUTH_CLIENT_SECRET (local only)."
         )
 

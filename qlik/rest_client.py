@@ -5,7 +5,7 @@ from typing import Iterator
 
 import requests
 
-from auth import QlikTokenProvider
+from .auth import QlikTokenProvider
 
 _MAX_RETRIES = 5
 

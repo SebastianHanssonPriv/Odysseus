@@ -16,11 +16,11 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from auth import QlikTokenProvider
-from config import load_settings
-from engine_client import QixEngineSession
-from lineage import extract_app_lineage
-from rest_client import QlikRestClient, list_apps
+from .auth import QlikTokenProvider
+from .config import load_settings
+from .engine_client import QixEngineSession
+from .lineage import extract_app_lineage
+from .rest_client import QlikRestClient, list_apps
 
 _SUMMARY_FIELDS = [
     "app_id",

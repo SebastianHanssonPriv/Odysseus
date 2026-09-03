@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Iterator
 
-from powerbi_client import PowerBIAdminClient
+from .powerbi_client import PowerBIAdminClient
 
 
 def _day_window(day: date) -> tuple[str, str]:

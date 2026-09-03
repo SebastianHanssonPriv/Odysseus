@@ -18,7 +18,7 @@ import json
 
 from websockets.sync.client import connect as ws_connect
 
-from auth import QlikTokenProvider
+from .auth import QlikTokenProvider
 
 
 class EngineApiError(RuntimeError):

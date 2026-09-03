@@ -5,7 +5,7 @@ import warnings
 
 import requests
 
-from config import QLIK_OAUTH_TOKEN_PATH, Settings
+from .config import QLIK_OAUTH_TOKEN_PATH, Settings
 
 _TOKEN_REFRESH_MARGIN_SECONDS = 300
 
@@ -34,10 +34,13 @@ class QlikTokenProvider:
             # (copy/cut disabled, memory only — never persisted).
             from secure_input import prompt_credentials
 
-            entered = prompt_credentials(
-                need_tenant=not settings.tenant_url,
-                need_client=not settings.oauth_client_id,
-            )
+            fields = []
+            if not settings.tenant_url:
+                fields.append(("tenant_url", "Tenant URL"))
+            if not settings.oauth_client_id:
+                fields.append(("client_id", "OAuth client ID"))
+            fields.append(("client_secret", "OAuth client secret"))
+            entered = prompt_credentials("Qlik Cloud credentials (development)", fields)
             if not entered:
                 raise SystemExit("Credential entry cancelled.")
             tenant = (settings.tenant_url or entered["tenant_url"]).rstrip("/")

@@ -33,8 +33,11 @@ class Settings:
 def load_settings(force_interactive: bool = False) -> Settings:
     tenant_id = os.environ.get("PBI_TENANT_ID", "").strip() or None
     client_id = os.environ.get("PBI_CLIENT_ID", "").strip() or None
-    kv_url = os.environ.get("KEY_VAULT_URL", "").strip() or None
-    kv_secret_name = os.environ.get("KEY_VAULT_SECRET_NAME", "").strip() or None
+    # Prefixed (not the bare KEY_VAULT_URL/KEY_VAULT_SECRET_NAME) because this
+    # program also holds the Qlik tool, whose OAuth client secret lives under
+    # a different secret name in the same or a different vault.
+    kv_url = os.environ.get("PBI_KEY_VAULT_URL", "").strip() or None
+    kv_secret_name = os.environ.get("PBI_KEY_VAULT_SECRET_NAME", "").strip() or None
     env_secret = os.environ.get("PBI_CLIENT_SECRET", "").strip() or None
     declared_mode = os.environ.get("PBI_AUTH_MODE", "").strip().lower() or None
 
@@ -54,7 +57,7 @@ def load_settings(force_interactive: bool = False) -> Settings:
     else:
         raise SystemExit(
             "No credential source configured. Use --interactive (local dev), or "
-            "set KEY_VAULT_URL + KEY_VAULT_SECRET_NAME (recommended), or "
+            "set PBI_KEY_VAULT_URL + PBI_KEY_VAULT_SECRET_NAME (recommended), or "
             "PBI_CLIENT_SECRET (local only), or PBI_AUTH_MODE=managed_identity."
         )
 

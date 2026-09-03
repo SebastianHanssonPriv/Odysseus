@@ -1,4 +1,4 @@
-# qlik-lineage
+# qlik (part of the Odysseus toolkit)
 
 Extracts data-model lineage for every app in a Qlik Cloud tenant via the
 Engine API: load script, script-derived LOAD/STORE lineage, the resident
@@ -23,24 +23,28 @@ confidence to put in each result.
 
 ## Setup
 
+Run from the repo root (`cli.py` there is the single entry point for both
+platforms — see the [root README](../README.md)):
+
 1. In the Qlik Cloud Management Console, create an OAuth **machine-to-machine
    (M2M)** client (Identity & access → OAuth clients). This is the service
    identity the tool authenticates as — not a personal account, not a
    personal long-lived API key — so access stays attributable and revocable
    independently of any one person, the same governance bar the Power BI
-   tool holds itself to with its service principal.
+   side holds itself to with its service principal.
 2. Copy `.env.example` to `.env` and fill in `QLIK_TENANT_URL` and
    `QLIK_OAUTH_CLIENT_ID`.
 3. Configure exactly one credential source for the client secret:
-   Key Vault (recommended), `QLIK_OAUTH_CLIENT_SECRET` in `.env` (local
-   prototyping only), or `--interactive` at runtime.
+   `QLIK_KEY_VAULT_URL` + `QLIK_KEY_VAULT_SECRET_NAME` (recommended),
+   `QLIK_OAUTH_CLIENT_SECRET` in `.env` (local prototyping only), or
+   `--interactive` at runtime.
 4. `pip install -r requirements.txt`
-5. `python cli.py extract`
+5. `python cli.py qlik extract`
 
 ## Command
 
 ```
-qlik-lineage extract [--data-dir PATH] [--interactive]
+odysseus qlik extract [--data-dir PATH] [--interactive]
 ```
 
 Writes, under `<data-dir>/lineage/`:

@@ -4,8 +4,8 @@ import time
 
 import requests
 
-from auth import PowerBITokenProvider
-from config import PBI_ADMIN_BASE
+from .auth import PowerBITokenProvider
+from .config import PBI_ADMIN_BASE
 
 _MAX_RETRIES = 5
 
