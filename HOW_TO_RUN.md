@@ -91,7 +91,9 @@ The **Field lineage** tab has two independent tools:
   `model_lineage_*.xlsx` and shows a status summary in the panel below.
   **Requires** the tenant admin setting "Enhance admin APIs responses with
   DAX and mashup expressions" (Admin portal → Tenant settings) — without it
-  every table comes back `no_expression_available`. Gen1 dataflows only.
+  every table comes back `no_expression_available`. Gen1 dataflows only,
+  matching the current environment — a baseline ahead of the move to Fabric
+  and Gen2 dataflows; see model_lineage.py if that adds Gen2 support later.
 
 ### Run it daily (unattended) — until Fabric takes over
 There is no automatic collection yet. Two ways to keep the daily history flowing:
