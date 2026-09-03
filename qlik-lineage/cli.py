@@ -28,7 +28,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     extract = sub.add_parser(
         "extract",
-        help="Pull script, lineage, and table/key info for every app in the tenant.",
+        help=(
+            "Pull script, lineage, table/key info, and per-QVD field usage "
+            "for every app in the tenant."
+        ),
     )
     extract.add_argument("--data-dir", type=Path, default=None)
     extract.add_argument(

@@ -1,5 +1,5 @@
 """``extract`` command implementation: pulls script/lineage/table info for
-every app in the tenant and writes a JSONL snapshot plus a summary CSV.
+every app in the tenant and writes a JSONL snapshot plus two summary CSVs.
 
 Unlike the Power BI activity log, Qlik's Engine API has no ~28-day retention
 cliff forcing a daily cadence — lineage reflects the app's current state, not
@@ -30,9 +30,27 @@ _SUMMARY_FIELDS = [
     "key_count",
     "lineage_statement_count",
     "script_line_count",
+    "qvd_sources_count",
+    "qvd_fields_confirmed_count",
+    "qvd_fields_unresolved_count",
     "extracted_at",
     "error",
 ]
+
+_QVD_USAGE_FIELDS = [
+    "app_id",
+    "app_name",
+    "qvd_source",
+    "target_table",
+    "source_field",
+    "final_field",
+    "simple_passthrough",
+    "status",
+]
+
+# Statuses that mean "this field is confirmed to exist, under this name, in
+# the final data model" -- see qvd_lineage.py for the full status taxonomy.
+_CONFIRMED_STATUSES = {"confirmed", "confirmed_case_mismatch", "derived_expression"}
 
 
 def run(data_dir: Path, interactive: bool = False) -> None:
@@ -45,8 +63,10 @@ def run(data_dir: Path, interactive: bool = False) -> None:
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     jsonl_path = out_dir / f"lineage_{stamp}.jsonl"
     summary_path = out_dir / f"lineage_summary_{stamp}.csv"
+    qvd_usage_path = out_dir / f"qvd_field_usage_{stamp}.csv"
 
     summary_rows = []
+    qvd_usage_rows = []
     with jsonl_path.open("w", encoding="utf-8") as fh:
         for item in list_apps(rest):
             app_id = item.get("resourceId")
@@ -57,14 +77,21 @@ def run(data_dir: Path, interactive: bool = False) -> None:
             record = _extract_one(tokens, app_id, app_name)
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
             summary_rows.append(_summarize(record))
+            qvd_usage_rows.extend(_qvd_usage_rows(record))
 
     with summary_path.open("w", newline="", encoding="utf-8-sig") as fh:
         writer = csv.DictWriter(fh, fieldnames=_SUMMARY_FIELDS)
         writer.writeheader()
         writer.writerows(summary_rows)
 
+    with qvd_usage_path.open("w", newline="", encoding="utf-8-sig") as fh:
+        writer = csv.DictWriter(fh, fieldnames=_QVD_USAGE_FIELDS)
+        writer.writeheader()
+        writer.writerows(qvd_usage_rows)
+
     print(f"Extracted lineage for {len(summary_rows)} apps -> {jsonl_path}")
     print(f"Summary -> {summary_path}")
+    print(f"QVD field usage ({len(qvd_usage_rows)} rows) -> {qvd_usage_path}")
 
 
 def _extract_one(tokens: QlikTokenProvider, app_id: str, app_name: str) -> dict:
@@ -87,6 +114,8 @@ def _extract_one(tokens: QlikTokenProvider, app_id: str, app_name: str) -> dict:
             "tables": [],
             "keys": [],
             "tables_error": None,
+            "qvd_field_usage": [],
+            "qvd_lineage_warnings": [],
             "extracted_at": extracted_at,
             "error": str(exc),
         }
@@ -98,6 +127,7 @@ def _summarize(record: dict) -> dict:
     field_count = sum(len(t.get("qFields", [])) for t in tables)
     script = record.get("script")
     error = record.get("error") or record.get("tables_error")
+    usage = record.get("qvd_field_usage") or []
     return {
         "app_id": record["app_id"],
         "app_name": record["app_name"],
@@ -106,6 +136,20 @@ def _summarize(record: dict) -> dict:
         "key_count": len(record.get("keys") or []),
         "lineage_statement_count": len(record.get("lineage") or []),
         "script_line_count": (script.count("\n") + 1) if script else 0,
+        "qvd_sources_count": len({u["qvd_source"] for u in usage}),
+        "qvd_fields_confirmed_count": sum(1 for u in usage if u["status"] in _CONFIRMED_STATUSES),
+        "qvd_fields_unresolved_count": sum(1 for u in usage if u["status"] not in _CONFIRMED_STATUSES),
         "extracted_at": record["extracted_at"],
         "error": error,
     }
+
+
+def _qvd_usage_rows(record: dict) -> list[dict]:
+    return [
+        {
+            "app_id": record["app_id"],
+            "app_name": record["app_name"],
+            **usage,
+        }
+        for usage in (record.get("qvd_field_usage") or [])
+    ]

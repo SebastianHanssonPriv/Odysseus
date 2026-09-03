@@ -19,16 +19,19 @@ module docstring:
             Exact for what is loaded; a script line count of zero apps still
             reports whatever the last successful reload left in memory.
 
-Not attempted: resolving which external data source each table's fields
-physically came from (i.e. going past GetLineage's script-level LOAD/STORE
-text to a fully typed source system name). That needs the connection
-metadata behind each LOAD statement, which the Engine API does not expose
-directly — a documented boundary, not a gap to fill with a guess.
+A fourth output, qvd_field_usage, goes further: for each QVD the script
+reads, which of its fields are confirmed present in the final data model.
+That is not a single Engine API call -- it is script.py's parsed LOAD
+statements cross-checked against the tables/keys above. See qvd_lineage.py
+for the per-field confidence tiers (confirmed / derived_expression /
+not_found_in_final_model / unresolved) and script_parser.PARSER_LIMITATIONS
+for exactly what the parser does and does not evaluate.
 """
 
 from __future__ import annotations
 
 from engine_client import QixEngineSession
+from qvd_lineage import resolve_qvd_field_usage, usages_as_dicts
 
 # Positional params for Doc.GetTablesAndKeys, in the API's documented order:
 # qWindowSize, qNullSize, qCellHeight, qSyntheticMode, qIncludeSysVars. The
@@ -65,6 +68,16 @@ def extract_app_lineage(session: QixEngineSession, app_id: str, app_name: str) -
         # should not discard those, only be reported alongside them.
         tables_error = str(exc)
 
+    qvd_field_usage: list = []
+    qvd_lineage_warnings: list = []
+    if tables_error is None:
+        # Only meaningful once we actually have the final model to check
+        # against -- without it every field would wrongly read as
+        # "target_table_unresolved" (looks like a parser failure, when the
+        # real cause is the missing GetTablesAndKeys result above).
+        usages, qvd_lineage_warnings = resolve_qvd_field_usage(script, tables)
+        qvd_field_usage = usages_as_dicts(usages)
+
     return {
         "app_id": app_id,
         "app_name": app_name,
@@ -73,4 +86,6 @@ def extract_app_lineage(session: QixEngineSession, app_id: str, app_name: str) -
         "tables": tables,
         "keys": keys,
         "tables_error": tables_error,
+        "qvd_field_usage": qvd_field_usage,
+        "qvd_lineage_warnings": qvd_lineage_warnings,
     }
