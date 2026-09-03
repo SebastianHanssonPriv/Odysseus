@@ -3,7 +3,7 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [('app_icon.ico', '.'), ('bufab_header.png', '.')]
 binaries = []
-hiddenimports = ['auth', 'config', 'powerbi_client', 'activity_events', 'raw_export', 'analytics', 'qlik_core', 'qlik_capacity']
+hiddenimports = ['auth', 'config', 'powerbi_client', 'activity_events', 'raw_export', 'analytics', 'qlik_core', 'qlik_capacity', 'scanner', 'dataflow_admin', 'mashup_parser', 'model_lineage']
 tmp_ret = collect_all('azure.identity')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('azure.keyvault.secrets')

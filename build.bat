@@ -59,6 +59,10 @@ python -m PyInstaller --onefile --windowed --name BufabBIGovernanceStudio ^
   --hidden-import analytics ^
   --hidden-import qlik_core ^
   --hidden-import qlik_capacity ^
+  --hidden-import scanner ^
+  --hidden-import dataflow_admin ^
+  --hidden-import mashup_parser ^
+  --hidden-import model_lineage ^
   studio_app.py
 if errorlevel 1 goto :error
 

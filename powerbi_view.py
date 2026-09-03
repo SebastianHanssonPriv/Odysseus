@@ -22,7 +22,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Signal, QDate
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox, QComboBox,
-    QTabWidget, QDateEdit, QScrollArea, QMessageBox,
+    QTabWidget, QDateEdit, QScrollArea, QMessageBox, QPlainTextEdit,
 )
 
 from config import Settings
@@ -39,6 +39,7 @@ class PowerBIView(QWidget):
     sig_done = Signal(str)
     sig_error = Signal(str, str)
     sig_usage_data = Signal(object)      # list of view records
+    sig_lineage_done = Signal(str)
 
     def __init__(self, shell):
         super().__init__()
@@ -48,6 +49,7 @@ class PowerBIView(QWidget):
         self.sig_done.connect(self._on_done)
         self.sig_error.connect(lambda t, m: QMessageBox.critical(self, t, m))
         self.sig_usage_data.connect(self._on_usage_data)
+        self.sig_lineage_done.connect(self._on_lineage_text)
         self._build()
 
     def log(self, msg):
@@ -232,6 +234,35 @@ class PowerBIView(QWidget):
         al.addWidget(a_scroll, 1)
         tabs.addTab(tab_a, "Usage analytics")
 
+        # Model lineage
+        tab_m = QWidget()
+        ml = QVBoxLayout(tab_m)
+        ml.setContentsMargins(0, 10, 0, 0)
+        mc = make_card()
+        mcl = QVBoxLayout(mc)
+        mcl.addWidget(label("MODEL LINEAGE  (semantic model table -> warehouse source, direct or "
+                            "through a Gen1 dataflow)", "section"))
+        mcl.addWidget(label("Tenant-wide scan via the Admin Scanner API - no workspace selection "
+                            "needed. Needs the tenant setting 'Enhance admin APIs responses with DAX "
+                            "and mashup expressions' enabled, or every table comes back as "
+                            "no_expression_available (see the Excel report's warning sheet). Writes "
+                            "one combined workbook (model_lineage_*.xlsx) listing, for each table, "
+                            "its source table/view and - where the M code makes it explicit - which "
+                            "fields.", "muted", wrap=True))
+        mrow = QHBoxLayout()
+        self.btn_lineage = QPushButton("Scan model lineage")
+        self.btn_lineage.setObjectName("accent")
+        self.btn_lineage.clicked.connect(self._on_lineage)
+        mrow.addWidget(self.btn_lineage)
+        mrow.addStretch(1)
+        mcl.addLayout(mrow)
+        ml.addWidget(mc)
+        self.lineage_panel = QPlainTextEdit()
+        self.lineage_panel.setReadOnly(True)
+        self.lineage_panel.setMinimumHeight(150)
+        ml.addWidget(self.lineage_panel, 1)
+        tabs.addTab(tab_m, "Model lineage")
+
         root.addWidget(tabs, 1)
 
     # ================= collect =================
@@ -381,6 +412,52 @@ class PowerBIView(QWidget):
             self.sig_error.emit("Usage analytics failed", str(e))
         finally:
             self.sig_done.emit("analytics")
+
+    # ================= model lineage =================
+    def _on_lineage_text(self, text):
+        self.lineage_panel.setPlainText(text)
+
+    def _on_lineage(self):
+        data_dir = self._data_dir()
+        if not data_dir:
+            return
+        try:
+            settings = self._pbi_settings(data_dir)
+        except ValueError as e:
+            QMessageBox.warning(self, "Power BI settings", str(e))
+            return
+        self.btn_lineage.setEnabled(False)
+        self.shell.busy_begin("Scanning model lineage")
+        self.log("Scanning Power BI model lineage (tenant-wide) ...")
+        threading.Thread(target=self._lineage_worker, args=(settings, data_dir), daemon=True).start()
+
+    def _lineage_worker(self, settings, data_dir):
+        try:
+            from auth import PowerBITokenProvider
+            from powerbi_client import PowerBIAdminClient
+            from model_lineage import scan_model_lineage, render_model_lineage_text, write_model_lineage_report
+
+            tokens = PowerBITokenProvider(settings)
+            client = PowerBIAdminClient(tokens)
+            results = scan_model_lineage(client, cancel_check=self.shell.cancel_requested,
+                                         log=self.shell.sig_log.emit)
+            if self.shell.cancel_requested():
+                self.log("Model lineage scan cancelled - no report written.")
+                return
+            if not results:
+                self.log("No semantic models found.")
+                return
+            text = render_model_lineage_text(results)
+            self.sig_lineage_done.emit(text)
+            out_path = write_model_lineage_report(results, data_dir / "model_lineage", self.shell.sig_log.emit)
+            self.log(f"Model lineage report -> {Path(out_path).name}")
+        except Exception as e:
+            self.log(f"ERROR scanning model lineage: {e}")
+            self.sig_error.emit("Model lineage scan failed",
+                                f"{e}\n\nCheck the Power BI tenant/client IDs and credential in "
+                                "Settings, and that the service principal is in the Power BI admin group.")
+        finally:
+            self.sig_done.emit("lineage")
 
     # ---------- filter wiring ----------
     def _on_usage_data(self, records):
@@ -594,3 +671,5 @@ class PowerBIView(QWidget):
             self.btn_raw.setEnabled(True)
         elif which == "analytics":
             self.btn_analytics.setEnabled(True)
+        elif which == "lineage":
+            self.btn_lineage.setEnabled(True)

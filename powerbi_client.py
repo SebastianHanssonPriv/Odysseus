@@ -43,3 +43,23 @@ class PowerBIAdminClient:
             return resp.json()
 
         raise RuntimeError(f"Gave up after {_MAX_RETRIES} retries: {url}")
+
+    def post(self, path: str, params: dict | None = None, json: dict | None = None) -> dict:
+        url = f"{self._base}/{path.lstrip('/')}"
+
+        for attempt in range(_MAX_RETRIES):
+            headers = {"Authorization": f"Bearer {self._tokens.token()}"}
+            resp = self._session.post(url, headers=headers, params=params, json=json, timeout=120)
+
+            if resp.status_code == 429:
+                wait = int(resp.headers.get("Retry-After", "30"))
+                time.sleep(wait)
+                continue
+            if resp.status_code >= 500:
+                time.sleep(2 ** attempt)
+                continue
+
+            resp.raise_for_status()
+            return resp.json()
+
+        raise RuntimeError(f"Gave up after {_MAX_RETRIES} retries: {url}")

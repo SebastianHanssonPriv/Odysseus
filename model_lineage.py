@@ -1,0 +1,369 @@
+"""Per-table source resolution for Power BI semantic models (datasets).
+
+Combines the scanner API's per-table M expression with the dataflow export
+API's per-entity M code to answer, for each table in each semantic model,
+which warehouse table/view (or other data source) it ultimately reads from,
+and which of that source's fields it keeps -- chasing through Gen1 dataflow
+references when a table's own source is "Get Data > Power BI dataflows"
+rather than a direct connector call, and through same-document staging-query
+references at both the dataset and the dataflow level.
+"""
+
+from __future__ import annotations
+
+import csv
+import datetime
+import os
+from dataclasses import asdict, dataclass, field
+
+from dataflow_admin import export_dataflow
+from mashup_parser import MAX_REFERENCE_DEPTH, resolve_source, split_shared_queries
+from scanner import list_workspace_ids, scan_workspaces
+
+# Dataflow-boundary hops (dataset -> dataflow -> dataflow -> ...) are capped
+# independently of mashup_parser's own same-document reference-chasing cap,
+# since a dataflow can itself be built on another dataflow (linked entities).
+_MAX_DATAFLOW_HOPS = MAX_REFERENCE_DEPTH
+
+
+@dataclass
+class TableSourceResult:
+    workspace_id: str
+    workspace_name: str
+    dataset_id: str
+    dataset_name: str
+    table_name: str
+    status: str
+    hops: list[dict] = field(default_factory=list)
+    direct_sources: list[dict] = field(default_factory=list)
+    note: str | None = None
+
+
+class DataflowCache:
+    """Fetches and parses each dataflow's export at most once per run."""
+
+    def __init__(self, client):
+        self._client = client
+        self._queries: dict[str, dict[str, str] | None] = {}  # None = export/parse failed
+        self._errors: dict[str, str] = {}
+
+    def queries_for(self, dataflow_id: str) -> dict[str, str] | None:
+        if dataflow_id not in self._queries:
+            try:
+                definition = export_dataflow(self._client, dataflow_id)
+                document = definition.get("pbi:mashup", {}).get("document", "")
+                if not document:
+                    self._queries[dataflow_id] = None
+                    self._errors[dataflow_id] = (
+                        "export succeeded but no pbi:mashup.document found in the "
+                        "response -- unexpected/unverified shape, see "
+                        "dataflow_admin.export_dataflow's docstring"
+                    )
+                else:
+                    self._queries[dataflow_id] = split_shared_queries(document)
+            except Exception as exc:  # noqa: BLE001 - one dataflow's failure must not abort the run
+                self._queries[dataflow_id] = None
+                self._errors[dataflow_id] = str(exc)
+        return self._queries[dataflow_id]
+
+    def error_for(self, dataflow_id: str) -> str | None:
+        return self._errors.get(dataflow_id)
+
+
+def resolve_table_source(
+    workspace_id: str,
+    workspace_name: str,
+    dataset_id: str,
+    dataset_name: str,
+    table_name: str,
+    expression: str,
+    dataset_siblings: dict[str, str],
+    dataflow_cache: DataflowCache,
+) -> TableSourceResult:
+    base = dict(
+        workspace_id=workspace_id,
+        workspace_name=workspace_name,
+        dataset_id=dataset_id,
+        dataset_name=dataset_name,
+        table_name=table_name,
+    )
+    hops: list[dict] = []
+    current_expr = expression
+    current_siblings = dataset_siblings
+    current_label = f"dataset:{dataset_name}.{table_name}"
+
+    for _ in range(_MAX_DATAFLOW_HOPS + 1):
+        resolution = resolve_source(current_expr, sibling_queries=current_siblings)
+
+        if resolution.status == "dataflow_reference":
+            ref = resolution.dataflow_ref
+            hops.append(
+                {
+                    "from": current_label,
+                    "dataflow_workspace_id": ref.workspace_id,
+                    "dataflow_id": ref.dataflow_id,
+                    "entity": ref.entity,
+                    "same_document_hops": resolution.reference_chain,
+                }
+            )
+            if not ref.dataflow_id or not ref.entity:
+                return TableSourceResult(
+                    **base,
+                    status="dataflow_reference_incomplete",
+                    hops=hops,
+                    note="dataflow reference found but workspaceId/dataflowId/entity could not all be extracted from the M code",
+                )
+
+            queries = dataflow_cache.queries_for(ref.dataflow_id)
+            if queries is None:
+                return TableSourceResult(
+                    **base,
+                    status="dataflow_export_failed",
+                    hops=hops,
+                    note=dataflow_cache.error_for(ref.dataflow_id),
+                )
+            if ref.entity not in queries:
+                return TableSourceResult(
+                    **base,
+                    status="dataflow_entity_not_found",
+                    hops=hops,
+                    note=f"entity '{ref.entity}' not found among {len(queries)} parsed queries in dataflow {ref.dataflow_id}",
+                )
+
+            current_expr = queries[ref.entity]
+            current_siblings = queries
+            current_label = f"dataflow:{ref.dataflow_id}.{ref.entity}"
+            continue
+
+        if resolution.status in ("direct_source", "multiple_direct_sources"):
+            return TableSourceResult(
+                **base,
+                status=resolution.status,
+                hops=hops,
+                direct_sources=[asdict(s) for s in resolution.direct_sources],
+            )
+
+        return TableSourceResult(**base, status="unresolved", hops=hops, note=resolution.note)
+
+    return TableSourceResult(
+        **base,
+        status="max_hops_exceeded",
+        hops=hops,
+        note=f"dataflow reference chain exceeded {_MAX_DATAFLOW_HOPS} hops",
+    )
+
+
+# ============================================================
+#  Tenant-wide batch scan + report (the `model-lineage` feature)
+# ============================================================
+_NO_EXPRESSION_NOTE = (
+    "Scanner API returned no M expression for this table. Most likely cause: "
+    "the tenant setting 'Enhance admin APIs responses with DAX and mashup "
+    "expressions' is not enabled in Admin portal -> Tenant settings."
+)
+
+# Statuses whose row gets a warning tint in the Excel report.
+_BAD_STATUSES = {"unresolved", "no_expression_available", "dataflow_export_failed",
+                 "dataflow_entity_not_found"}
+_WARN_STATUSES = {"dataflow_reference_incomplete", "max_hops_exceeded", "multiple_direct_sources"}
+
+
+def scan_model_lineage(client, scan_timeout_seconds=600, cancel_check=None, log=print):
+    """Tenant-wide: for every table in every semantic model, resolve its
+    source (direct connector, or chased through Gen1 dataflow(s)) and, where
+    the M code says so explicitly, which fields survive. Returns a list of
+    TableSourceResult as dicts. cancel_check, if given, is polled between
+    workspaces and stops the scan early without raising."""
+    dataflow_cache = DataflowCache(client)
+    workspace_ids = list(list_workspace_ids(client))
+    results = []
+    batch_errors = 0
+
+    for workspace in scan_workspaces(client, workspace_ids, scan_timeout_seconds):
+        if cancel_check and cancel_check():
+            log("Model lineage scan cancelled.")
+            break
+        if "scan_batch_error" in workspace:
+            batch_errors += 1
+            log(f"  scan batch error: {workspace['scan_batch_error']}")
+            continue
+        results.extend(_resolve_workspace_datasets(workspace, dataflow_cache, log))
+
+    log(f"Scanned {len(workspace_ids)} workspace(s) ({batch_errors} batch error(s)), "
+        f"resolved {len(results)} table(s).")
+    return results
+
+
+def _resolve_workspace_datasets(workspace, dataflow_cache, log):
+    workspace_id = workspace.get("id", "")
+    workspace_name = workspace.get("name", "")
+    results = []
+
+    for dataset in workspace.get("datasets", []):
+        dataset_id = dataset.get("id", "")
+        dataset_name = dataset.get("name", "")
+        tables = dataset.get("tables", [])
+        dataset_siblings = _dataset_sibling_expressions(tables)
+
+        for table in tables:
+            table_name = table.get("name", "")
+            expression = _table_expression(table)
+            if expression is None:
+                result = TableSourceResult(
+                    workspace_id=workspace_id, workspace_name=workspace_name,
+                    dataset_id=dataset_id, dataset_name=dataset_name, table_name=table_name,
+                    status="no_expression_available", note=_NO_EXPRESSION_NOTE,
+                )
+            else:
+                result = resolve_table_source(
+                    workspace_id, workspace_name, dataset_id, dataset_name, table_name,
+                    expression, dataset_siblings, dataflow_cache,
+                )
+            results.append(asdict(result))
+        if tables:
+            log(f"  {workspace_name} / {dataset_name}: {len(tables)} table(s) resolved")
+    return results
+
+
+def _table_expression(table):
+    # Documented Scanner API shape: table.source -> [{"expression": "..."}].
+    source = table.get("source")
+    if not isinstance(source, list) or not source:
+        return None
+    first = source[0]
+    return first.get("expression") if isinstance(first, dict) else None
+
+
+def _dataset_sibling_expressions(tables):
+    siblings = {}
+    for t in tables:
+        expr = _table_expression(t)
+        name = t.get("name")
+        if name and expr:
+            siblings[name] = expr
+    return siblings
+
+
+def render_model_lineage_text(results):
+    counts: dict[str, int] = {}
+    for r in results:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    lines = [f"MODEL LINEAGE - {len(results)} table(s) scanned", ""]
+    for status, n in sorted(counts.items(), key=lambda kv: -kv[1]):
+        lines.append(f"  {status}: {n}")
+    lines.append("")
+    flagged = [r for r in results if r["status"] in _BAD_STATUSES]
+    for r in flagged[:20]:
+        lines.append(f"  {r['status'].upper()}: {r['workspace_name']} / {r['dataset_name']} / {r['table_name']}")
+    if len(flagged) > 20:
+        lines.append(f"  ... and {len(flagged) - 20} more - see the Excel report.")
+    lines.append("")
+    lines.append("Full detail, including every resolved source table and field, is in the Excel report.")
+    return "\n".join(lines)
+
+
+def _summarize_row(record):
+    direct = record.get("direct_sources") or []
+    connectors = "; ".join(d["connector"] for d in direct)
+    resolved_tables = "; ".join(d["resolved_table"] for d in direct if d.get("resolved_table"))
+    fields, field_sources = [], set()
+    for d in direct:
+        if d.get("fields"):
+            fields.extend(d["fields"])
+            field_sources.add(d.get("fields_source") or "")
+    return [
+        record["workspace_name"], record["dataset_name"], record["table_name"],
+        record["status"], len(record.get("hops") or []), connectors, resolved_tables,
+        ", ".join(fields), "/".join(sorted(field_sources)), record.get("note") or "",
+    ]
+
+
+def write_model_lineage_report(results, out_dir, log):
+    """One combined workbook: Summary (status counts) + Model lineage detail
+    -- one row per table: workspace, dataset, table, status, dataflow hop
+    count, connector, source table/view, and fields where the M code made
+    them explicit (see mashup_parser.extract_selected_fields)."""
+    os.makedirs(out_dir, exist_ok=True)
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    base = f"model_lineage_{stamp}"
+
+    status_counts: dict[str, int] = {}
+    for r in results:
+        status_counts[r["status"]] = status_counts.get(r["status"], 0) + 1
+    detail_rows = [_summarize_row(r) for r in results]
+
+    warn = ("READ FIRST - this is a best-effort text-level scan of each table's Power Query M "
+            "code, not an M interpreter (see mashup_parser.PARSER_LIMITATIONS). Fields are only "
+            "listed when the M code uses a native SQL Query= passthrough or an explicit "
+            "Table.SelectColumns call; a blank Fields column means every source column passes "
+            "through unnarrowed by this scan, not that the table has no fields. "
+            "'no_expression_available' usually means the tenant setting 'Enhance admin APIs "
+            "responses with DAX and mashup expressions' is not enabled.")
+
+    summary_headers = ["Status", "Table count"]
+    summary_rows = sorted(status_counts.items(), key=lambda kv: -kv[1])
+    detail_headers = ["Workspace", "Dataset", "Table", "Status", "Dataflow hops",
+                      "Connector", "Source table/view", "Fields (where resolved)",
+                      "Fields detected via", "Note"]
+
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from openpyxl.utils import get_column_letter
+    except Exception:
+        detail_path = os.path.join(out_dir, f"{base}.csv")
+        with open(detail_path, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            w.writerow(detail_headers)
+            w.writerows(detail_rows)
+        log("openpyxl not installed - wrote a CSV file instead of a workbook.")
+        return detail_path
+
+    wb = Workbook()
+    head_font = Font(bold=True, color="FFFFFF")
+    head_fill = PatternFill("solid", fgColor="315C6D")
+    warn_font = Font(bold=True, color="B00020")
+    wrap = Alignment(wrap_text=True, vertical="top")
+    status_fill = {s: PatternFill("solid", fgColor="F7D9DE") for s in _BAD_STATUSES}
+    status_fill.update({s: PatternFill("solid", fgColor="F7ECD2") for s in _WARN_STATUSES})
+
+    def style_header_row(ws, row, ncols):
+        for c in range(1, ncols + 1):
+            ws.cell(row=row, column=c).font = head_font
+            ws.cell(row=row, column=c).fill = head_fill
+
+    ws = wb.active
+    ws.title = "Summary"
+    ws.append(["IMPORTANT - PLEASE READ"])
+    ws["A1"].font = warn_font
+    ws.append([warn])
+    ws.cell(row=ws.max_row, column=1).font = warn_font
+    ws.cell(row=ws.max_row, column=1).alignment = wrap
+    ws.append([])
+    ws.append(summary_headers)
+    style_header_row(ws, ws.max_row, len(summary_headers))
+    for status, n in summary_rows:
+        ws.append([status, n])
+    ws.column_dimensions["A"].width = 40
+    ws.column_dimensions["B"].width = 14
+
+    ds = wb.create_sheet("Model lineage")
+    ds.append(detail_headers)
+    style_header_row(ds, 1, len(detail_headers))
+    status_col = detail_headers.index("Status")
+    for r in detail_rows:
+        rn = ds.max_row + 1
+        ds.append(r)
+        fill = status_fill.get(r[status_col])
+        if fill:
+            for c in range(1, len(detail_headers) + 1):
+                ds.cell(row=rn, column=c).fill = fill
+    for i, w in enumerate((22, 22, 22, 26, 12, 20, 26, 40, 16, 40), 1):
+        ds.column_dimensions[get_column_letter(i)].width = w
+    if detail_rows:
+        ds.freeze_panes = "A2"
+        ds.auto_filter.ref = f"A1:{get_column_letter(len(detail_headers))}{ds.max_row}"
+
+    out_path = os.path.join(out_dir, f"{base}.xlsx")
+    wb.save(out_path)
+    return out_path

@@ -83,6 +83,15 @@ The **Field lineage** tab has two independent tools:
 - **Usage analytics** — aggregate view events into the usage tables (CSV) and
   show the dashboard (top reports, top users, views-per-day, least-viewed
   reports).
+- **Model lineage** — tenant-wide (no selection needed): for every table in
+  every semantic model, resolves its warehouse source — direct, or chased
+  through a Gen1 dataflow — from each table's actual Power Query M code, and
+  the specific fields kept where the M code makes that explicit (a native
+  SQL `Query=` passthrough or an explicit `Table.SelectColumns`). Writes one
+  `model_lineage_*.xlsx` and shows a status summary in the panel below.
+  **Requires** the tenant admin setting "Enhance admin APIs responses with
+  DAX and mashup expressions" (Admin portal → Tenant settings) — without it
+  every table comes back `no_expression_available`. Gen1 dataflows only.
 
 ### Run it daily (unattended) — until Fabric takes over
 There is no automatic collection yet. Two ways to keep the daily history flowing:
