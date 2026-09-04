@@ -247,12 +247,18 @@ class PowerBIView(QWidget):
                             "and mashup expressions' enabled, or every table comes back as "
                             "no_expression_available (see the Excel report's warning sheet). Writes "
                             "one combined workbook (model_lineage_*.xlsx) listing, for each table, "
-                            "its source table/view, which fields where the M code makes it explicit, "
-                            "and - for every model column - whether it's referenced by a measure or "
-                            "calculated column's DAX expression anywhere in the dataset (the closest "
-                            "proxy to 'used in a report' available without Power BI exposing visual/"
-                            "page content via API - a raw column placed directly on a visual with no "
-                            "calculation involved can't be detected this way).", "muted", wrap=True))
+                            "every source table/view it reads from - not just its primary one: a "
+                            "second table combined in to enrich/fix data (whether the same connector "
+                            "used twice, or a merge/join onto another query in the same dataset or "
+                            "dataflow) is also resolved and tagged with which query brought it in - "
+                            "which fields where the M code makes it explicit, and - for every model "
+                            "column - whether it's referenced by a measure or calculated column's DAX "
+                            "expression anywhere in the dataset (the closest proxy to 'used in a "
+                            "report' available without Power BI exposing visual/page content via API "
+                            "- a raw column placed directly on a visual with no calculation involved "
+                            "can't be detected this way). Also writes a Sources sheet: the reverse "
+                            "view, for each resolved source, how many tables across the tenant "
+                            "actually pull from it.", "muted", wrap=True))
         mrow = QHBoxLayout()
         self.btn_lineage = QPushButton("Scan model lineage")
         self.btn_lineage.setObjectName("accent")

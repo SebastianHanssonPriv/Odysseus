@@ -331,6 +331,11 @@ def render_model_lineage_text(results):
     if all_cols:
         lines.append(f"  Columns: {len(all_cols)} total, {used_cols} referenced by a DAX "
                      f"calculation (measure or calculated column) somewhere in their dataset")
+    source_rows = _build_source_usage(results)
+    if source_rows:
+        top = source_rows[0]
+        lines.append(f"  Sources: {len(source_rows)} distinct resolved source(s) - most used: "
+                     f"{top[1]} ({top[0]}), used by {top[2]} table(s)")
     lines.append("")
     flagged = [r for r in results if r["status"] in _BAD_STATUSES]
     for r in flagged[:20]:
@@ -346,7 +351,10 @@ def render_model_lineage_text(results):
 def _summarize_row(record):
     direct = record.get("direct_sources") or []
     connectors = "; ".join(d["connector"] for d in direct)
-    resolved_tables = "; ".join(d["resolved_table"] for d in direct if d.get("resolved_table"))
+    resolved_tables = "; ".join(
+        d["resolved_table"] + (f" (via {d['via_query']})" if d.get("via_query") else "")
+        for d in direct if d.get("resolved_table")
+    )
     fields, field_sources = [], set()
     for d in direct:
         if d.get("fields"):
@@ -359,11 +367,34 @@ def _summarize_row(record):
     ]
 
 
+def _build_source_usage(results):
+    """Reverse index: for each resolved source (connector + table/view), how
+    many distinct model tables across the tenant actually pull from it -- the
+    sources-perspective companion to the table-by-table Model lineage sheet,
+    e.g. to spot one warehouse table feeding dozens of tables versus one used
+    nowhere else. 'Used by' counts distinct (workspace, dataset, table)
+    consumers, including ones that reach this source via a merge/join onto
+    another query, not literally Gen1 dataflow artifacts. Sorted by usage,
+    highest first."""
+    usage: dict[tuple[str, str], set[tuple[str, str, str]]] = {}
+    for r in results:
+        consumer = (r["workspace_id"], r["dataset_id"], r["table_name"])
+        for d in (r.get("direct_sources") or []):
+            label = d.get("resolved_table") or d.get("connection_args") or "(unresolved)"
+            usage.setdefault((d.get("connector") or "", label), set()).add(consumer)
+    rows = [[connector, label, len(consumers)] for (connector, label), consumers in usage.items()]
+    rows.sort(key=lambda r: -r[2])
+    return rows
+
+
 def write_model_lineage_report(results, out_dir, log):
     """One combined workbook: Summary (status counts) + Model lineage detail
     -- one row per table: workspace, dataset, table, status, dataflow hop
-    count, connector, source table/view, and fields where the M code made
-    them explicit (see mashup_parser.extract_selected_fields)."""
+    count, connector(s), source table(s)/view(s) (including any brought in
+    via a merge/join onto another query), and fields where the M code made
+    them explicit (see mashup_parser.extract_selected_fields) -- plus Column
+    usage (DAX-reference check) and Sources (the reverse view: for each
+    resolved source, how many tables pull from it)."""
     os.makedirs(out_dir, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     base = f"model_lineage_{stamp}"
@@ -382,23 +413,41 @@ def write_model_lineage_report(results, out_dir, log):
     total_cols = len(column_rows)
     used_cols = sum(1 for r in column_rows if r[-1] == "Yes")
 
+    source_headers = ["Connector", "Source table/view", "Used by N table(s)"]
+    source_rows = _build_source_usage(results)
+
     warn = ("READ FIRST - this is a best-effort text-level scan of each table's Power Query M "
             "code, not an M interpreter (see mashup_parser.PARSER_LIMITATIONS). Fields are only "
             "listed when the M code uses a native SQL Query= passthrough or an explicit "
             "Table.SelectColumns call; a blank Fields column means every source column passes "
-            "through unnarrowed by this scan, not that the table has no fields. "
-            "'no_expression_available' usually means the tenant setting 'Enhance admin APIs "
-            "responses with DAX and mashup expressions' is not enabled. 'Used in a DAX "
-            "calculation' (Column usage sheet) means the column is referenced by a measure or "
-            "calculated column's DAX expression somewhere in its dataset - Power BI's Admin APIs "
-            "expose no report/visual content (unlike Qlik's Engine API), so a raw column placed "
-            "directly on a visual with no calculation involved cannot be detected; a 'No' is a "
-            "candidate to verify by hand, not a verdict that the column is unused.")
+            "through unnarrowed by this scan, not that the table has no fields, and when a table "
+            "has more than one source (see below) this is detected across the whole M expression, "
+            "not per source, so it may not map cleanly to just one of them. A table can now show "
+            "more than one Connector/Source table/view, semicolon-separated: either two calls to "
+            "the same connector (e.g. two tables from the same SQL server combined to fix/enrich "
+            "data), or a source brought in via a merge/join onto another query in the same "
+            "document (Power Query's 'Merge queries'/'Append queries'), marked '(via "
+            "<QueryName>)' - a merge partner that is itself a Gen1 dataflow, or that could not "
+            "itself be resolved, is still listed but not chased any further, and (datasets only) "
+            "a merge partner that is a Power Query helper query not loaded as a model table is "
+            "invisible to this scan (see mashup_parser.PARSER_LIMITATIONS for the full list of "
+            "what this text-level scan cannot see). 'no_expression_available' usually means the "
+            "tenant setting 'Enhance admin APIs responses with DAX and mashup expressions' is not "
+            "enabled. 'Used in a DAX calculation' (Column usage sheet) means the column is "
+            "referenced by a measure or calculated column's DAX expression somewhere in its "
+            "dataset - Power BI's Admin APIs expose no report/visual content (unlike Qlik's Engine "
+            "API), so a raw column placed directly on a visual with no calculation involved cannot "
+            "be detected; a 'No' is a candidate to verify by hand, not a verdict that the column is "
+            "unused. The Sources sheet flips the view around: for each resolved source, how many "
+            "distinct model tables across the tenant actually pull from it - 'table(s)', not "
+            "literally Gen1 dataflow artifacts, since a table can reach a source directly or via a "
+            "dataflow or a merge.")
 
     summary_headers = ["Status", "Table count"]
     summary_rows = sorted(status_counts.items(), key=lambda kv: -kv[1])
     summary_rows.append(("Columns referenced by a DAX calculation",
                          f"{used_cols} / {total_cols}" if total_cols else "0 / 0"))
+    summary_rows.append(("Distinct resolved sources", len(source_rows)))
     detail_headers = ["Workspace", "Dataset", "Table", "Status", "Dataflow hops",
                       "Connector", "Source table/view", "Fields (where resolved)",
                       "Fields detected via", "Note"]
@@ -418,6 +467,11 @@ def write_model_lineage_report(results, out_dir, log):
             w = csv.writer(f)
             w.writerow(column_headers)
             w.writerows(column_rows)
+        sources_path = os.path.join(out_dir, f"{base}_sources.csv")
+        with open(sources_path, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            w.writerow(source_headers)
+            w.writerows(source_rows)
         log("openpyxl not installed - wrote CSV files instead of one workbook.")
         return detail_path
 
@@ -482,6 +536,17 @@ def write_model_lineage_report(results, out_dir, log):
     if column_rows:
         cu.freeze_panes = "A2"
         cu.auto_filter.ref = f"A1:{get_column_letter(len(column_headers))}{cu.max_row}"
+
+    src = wb.create_sheet("Sources")
+    src.append(source_headers)
+    style_header_row(src, 1, len(source_headers))
+    for r in source_rows:
+        src.append(r)
+    for i, w in enumerate((26, 40, 20), 1):
+        src.column_dimensions[get_column_letter(i)].width = w
+    if source_rows:
+        src.freeze_panes = "A2"
+        src.auto_filter.ref = f"A1:{get_column_letter(len(source_headers))}{src.max_row}"
 
     out_path = os.path.join(out_dir, f"{base}.xlsx")
     wb.save(out_path)

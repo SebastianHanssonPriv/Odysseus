@@ -136,21 +136,34 @@ level in the Qlik admin console before relying on it.
   every semantic model, resolves its warehouse source — direct, or chased
   through a Gen1 dataflow — from each table's actual Power Query M code, and
   the specific fields kept where the M code makes that explicit (a native
-  SQL `Query=` passthrough or an explicit `Table.SelectColumns`). Also, for
-  every column the Scanner API lists on the model (independent of whether the
-  M code above was resolvable), whether it's referenced by a measure or
-  calculated column's DAX expression anywhere in its dataset — the closest
-  proxy to "used in a report" available: Power BI's Admin APIs expose no
-  report/visual content at all (unlike Qlik's Engine API), so a raw column
+  SQL `Query=` passthrough or an explicit `Table.SelectColumns`). A table can
+  have **more than one source**, and both are resolved: two calls to the same
+  connector in one table's own M code (e.g. two tables pulled from the same
+  SQL server to fix/enrich each other), and a source brought in via a
+  merge/join onto another query in the same dataset or dataflow (Power
+  Query's "Merge queries"/"Append queries") — shown tagged `(via
+  <QueryName>)` so it's clear it isn't the table's own primary source. A
+  merge partner that is itself a Gen1 dataflow reference, or that couldn't be
+  resolved, is still listed but not chased further; a merge partner that's a
+  Power Query helper query not loaded as an actual model table is invisible
+  to this scan for a **dataset** (a Gen1 **dataflow**'s full document is
+  exported regardless of load state, so that limitation doesn't apply there).
+  Also, for every column the Scanner API lists on the model (independent of
+  whether the M code above was resolvable), whether it's referenced by a
+  measure or calculated column's DAX expression anywhere in its dataset — the
+  closest proxy to "used in a report" available: Power BI's Admin APIs expose
+  no report/visual content at all (unlike Qlik's Engine API), so a raw column
   placed directly on a visual with no calculation involved cannot be
   detected this way, and a "No" is a candidate to verify by hand, not a
   verdict. Writes one `model_lineage_*.xlsx` (Summary, Model lineage, Column
-  usage) and shows a status summary in the panel below. **Requires** the
-  tenant admin setting "Enhance admin APIs responses with DAX and mashup
-  expressions" (Admin portal → Tenant settings) — without it every table
-  comes back `no_expression_available`. Gen1 dataflows only, matching the
-  current environment — a baseline ahead of the move to Fabric and Gen2
-  dataflows; see model_lineage.py if that adds Gen2 support later.
+  usage, and **Sources** — the reverse view: for each resolved source, how
+  many tables across the tenant actually pull from it, highest first) and
+  shows a status summary in the panel below. **Requires** the tenant admin
+  setting "Enhance admin APIs responses with DAX and mashup expressions"
+  (Admin portal → Tenant settings) — without it every table comes back
+  `no_expression_available`. Gen1 dataflows only, matching the current
+  environment — a baseline ahead of the move to Fabric and Gen2 dataflows;
+  see model_lineage.py if that adds Gen2 support later.
 
 ### Run it daily (unattended) — until Fabric takes over
 There is no automatic collection yet. Two ways to keep the daily history flowing:

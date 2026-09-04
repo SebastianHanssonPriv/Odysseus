@@ -29,8 +29,15 @@ module resolves with confidence:
   - A same-document reference: `let Source = OtherQueryName in Source`,
     common in dataflows as a "staging query" pattern -- followed one hop at
     a time into the referenced query's own expression, up to a bounded depth.
-  - Multiple distinct connector calls in one expression (e.g. Table.Combine
-    of two sources) -- reported as such rather than silently picking one.
+  - Multiple connector calls feeding one table -- whether written out more
+    than once in the table's own text (e.g. two Sql.Database(...) calls
+    combined via Table.Combine to enrich/fix data from the same server), or
+    brought in via a merge/append/join onto ANOTHER query in the same
+    document (Table.NestedJoin, Table.Join, Table.FuzzyNestedJoin,
+    Table.Combine -- Power Query's "Merge queries"/"Append queries" UI
+    actions) -- each reported as its own source (tagged with which query it
+    came in via, for the merge case) rather than the second one being
+    silently dropped.
 
 Everything else is reported as unresolved rather than guessed -- see
 PARSER_LIMITATIONS.
@@ -50,14 +57,26 @@ PARSER_LIMITATIONS = (
     "Same-document query references are followed by name for at most "
     "MAX_REFERENCE_DEPTH hops; a longer chain, or one that loops, stops and "
     "is flagged rather than followed indefinitely. A table produced by "
-    "merging/joining two already-resolved queries (Table.NestedJoin, "
-    "Table.Combine) is reported with all of the distinct connector calls "
-    "found in its own text, but transformation logic that changes which "
-    "columns survive is not analyzed. Field-level detail is only reported "
-    "when the M code uses a native SQL Query= passthrough or an explicit "
-    "Table.SelectColumns call -- any other transform chain (renames, "
-    "computed columns, multi-step narrowing) leaves the field list "
-    "unresolved rather than guessed."
+    "merging/joining another query (Table.NestedJoin, Table.Join, "
+    "Table.FuzzyNestedJoin, Table.Combine) has that query's own source(s) "
+    "resolved too, tagged with which query brought them in -- but only when "
+    "the referenced query is itself visible to this scan: for a Gen1 "
+    "dataflow, every query is (the whole document is exported), but for a "
+    "dataset, only queries loaded as an actual model table are (a Power "
+    "Query helper query set to 'Enable load = false', used only to feed a "
+    "merge, is invisible to the Scanner API and cannot be traced). A local "
+    "`let`-step that happens to share its name with a real sibling query is "
+    "indistinguishable from an actual reference to it. A merge partner that "
+    "is itself a dataflow reference, or that could not itself be resolved, "
+    "is still listed but not chased any further. Transformation logic that "
+    "changes which columns survive a merge/join is not analyzed. "
+    "Field-level detail is only reported when the M code uses a native SQL "
+    "Query= passthrough or an explicit Table.SelectColumns call -- any "
+    "other transform chain (renames, computed columns, multi-step "
+    "narrowing) leaves the field list unresolved rather than guessed, and "
+    "is detected across the whole expression rather than per individual "
+    "source, so a table with more than one source may not have its field "
+    "list map cleanly to just one of them."
 )
 
 MAX_REFERENCE_DEPTH = 5
@@ -124,6 +143,9 @@ class DirectSource:
     selector: dict = field(default_factory=dict)
     fields: list[str] | None = None  # None = not narrowed by a recognized pattern (all columns pass through)
     fields_source: str | None = None  # "sql_query" | "select_columns" | None
+    via_query: str | None = None  # sibling query name this was pulled in through via a merge/
+                                  # append/join, e.g. "Merge queries" onto a Products lookup --
+                                  # None means it's this table's own primary source.
 
 
 @dataclass
@@ -190,21 +212,34 @@ def _parse_selectors(text: str) -> list[dict[str, str]]:
     return blocks
 
 
-def _find_call_span(text: str, func_name: str) -> tuple[int, int] | None:
-    """Return (start, end) of func_name(...)'s argument text, paren-matched."""
-    idx = text.find(func_name + "(")
-    if idx == -1:
-        return None
-    open_paren = idx + len(func_name)
-    depth = 0
-    for i in range(open_paren, len(text)):
-        if text[i] == "(":
-            depth += 1
-        elif text[i] == ")":
-            depth -= 1
-            if depth == 0:
-                return open_paren + 1, i
-    return None
+def _find_all_call_spans(text: str, func_name: str) -> list[tuple[int, int]]:
+    """Every func_name(...) call's argument span in text, paren-matched --
+    not just the first, so two calls to the SAME connector function (e.g.
+    two Sql.Database(...) calls combined via Table.Combine to enrich/fix
+    data from the same server) are both found instead of the second being
+    silently dropped."""
+    spans = []
+    marker = func_name + "("
+    pos = 0
+    while True:
+        idx = text.find(marker, pos)
+        if idx == -1:
+            break
+        open_paren = idx + len(func_name)
+        depth, end = 0, None
+        for i in range(open_paren, len(text)):
+            if text[i] == "(":
+                depth += 1
+            elif text[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end is None:
+            break
+        spans.append((open_paren + 1, end))
+        pos = end + 1
+    return spans
 
 
 def extract_dataflow_reference(expr: str) -> DataflowReference | None:
@@ -230,32 +265,78 @@ def extract_dataflow_reference(expr: str) -> DataflowReference | None:
 def extract_direct_sources(expr: str) -> list[DirectSource]:
     sources = []
     for func in _DIRECT_SOURCE_FUNCTIONS:
-        span = _find_call_span(expr, func)
-        if span is None:
-            continue
-        start, end = span
-        args = expr[start:end].strip()
-        # The first selector after the call's closing paren is (by far the
-        # most common M pattern) the one that navigates to the specific
-        # table/view/file; selectors further downstream are usually column
-        # projections, not further source navigation.
-        after = expr[end:]
-        selectors = _parse_selectors(after)
-        selector = selectors[0] if selectors else {}
-        resolved_table = None
-        if selector:
-            schema = selector.get("Schema")
-            item = selector.get("Item") or selector.get("Name") or selector.get("Table")
-            if schema and item:
-                resolved_table = f"{schema}.{item}"
-            elif item:
-                resolved_table = item
-        fields, fields_source = extract_selected_fields(expr)
-        sources.append(
-            DirectSource(connector=func, connection_args=args, resolved_table=resolved_table,
-                         selector=selector, fields=fields, fields_source=fields_source)
-        )
+        for start, end in _find_all_call_spans(expr, func):
+            args = expr[start:end].strip()
+            # The first selector after the call's closing paren is (by far the
+            # most common M pattern) the one that navigates to the specific
+            # table/view/file; selectors further downstream are usually column
+            # projections, not further source navigation.
+            after = expr[end:]
+            selectors = _parse_selectors(after)
+            selector = selectors[0] if selectors else {}
+            resolved_table = None
+            if selector:
+                schema = selector.get("Schema")
+                item = selector.get("Item") or selector.get("Name") or selector.get("Table")
+                if schema and item:
+                    resolved_table = f"{schema}.{item}"
+                elif item:
+                    resolved_table = item
+            fields, fields_source = extract_selected_fields(expr)
+            sources.append(
+                DirectSource(connector=func, connection_args=args, resolved_table=resolved_table,
+                             selector=selector, fields=fields, fields_source=fields_source)
+            )
     return sources
+
+
+_MERGE_FUNCTIONS = ("Table.NestedJoin", "Table.Join", "Table.FuzzyNestedJoin", "Table.Combine")
+_BARE_TOKEN_RE = re.compile(r'#"([^"]+)"|\b([A-Za-z_]\w*)\b')
+
+
+def _find_merge_partner_names(expr: str, known_names: set[str]) -> list[str]:
+    """Sibling query/entity names referenced as arguments to a merge/append
+    call (Table.NestedJoin, Table.Join, Table.FuzzyNestedJoin, Table.Combine)
+    -- Power Query's "Merge queries"/"Append queries" UI actions -- so a
+    second (or third...) source brought in to enrich or correct the primary
+    one isn't silently dropped. Best-effort: string literals (column-name
+    lists, join-kind text) are blanked out first so they can't be mistaken
+    for a bare identifier; a local `let`-step that happens to share its name
+    with a real sibling query is indistinguishable from an actual reference
+    to it, same class of risk as every other text-level match in this
+    module. Order-preserving, de-duplicated."""
+    found = []
+    for func in _MERGE_FUNCTIONS:
+        for start, end in _find_all_call_spans(expr, func):
+            args = _QUOTED_RE.sub(" ", expr[start:end])
+            for m in _BARE_TOKEN_RE.finditer(args):
+                name = m.group(1) or m.group(2)
+                if name in known_names and name not in found:
+                    found.append(name)
+    return found
+
+
+def _flatten_merge_partner(via_name: str, nested: "SourceResolution") -> list[DirectSource]:
+    """Fold a merge partner's own resolution into this table's source list,
+    tagged with which query brought it in. A partner that itself is a Power
+    BI dataflow reference or couldn't be resolved is still surfaced (as a
+    single best-effort entry) rather than silently dropped, but is not
+    chased any further -- re-run the scan targeting that dataflow directly
+    if its own ultimate source matters."""
+    if nested.status in ("direct_source", "multiple_direct_sources"):
+        return [DirectSource(connector=d.connector, connection_args=d.connection_args,
+                             resolved_table=d.resolved_table, selector=d.selector,
+                             fields=d.fields, fields_source=d.fields_source, via_query=via_name)
+               for d in nested.direct_sources]
+    if nested.status == "dataflow_reference":
+        ref = nested.dataflow_ref
+        label = ref.entity or ref.dataflow_name or ref.dataflow_id or "?"
+        return [DirectSource(connector="(Power BI dataflow, not chased further)",
+                             connection_args=f"dataflowId={ref.dataflow_id or ''}",
+                             resolved_table=label, via_query=via_name)]
+    return [DirectSource(connector="(unresolved merge partner)",
+                         connection_args=nested.note or "", resolved_table=via_name,
+                         via_query=via_name)]
 
 
 def _find_bare_reference(expr: str, known_names: set[str]) -> str | None:
@@ -305,6 +386,14 @@ def resolve_source(
         return SourceResolution(status="dataflow_reference", dataflow_ref=dataflow_ref, reference_chain=chain)
 
     direct = extract_direct_sources(expr)
+
+    if _depth < MAX_REFERENCE_DEPTH:
+        available = set(sibling_queries) - set(chain)
+        for name in _find_merge_partner_names(expr, available):
+            nested = resolve_source(sibling_queries[name], sibling_queries=sibling_queries,
+                                    _depth=_depth + 1, _chain=chain + [name])
+            direct.extend(_flatten_merge_partner(name, nested))
+
     if len(direct) == 1:
         return SourceResolution(status="direct_source", direct_sources=direct, reference_chain=chain)
     if len(direct) > 1:
