@@ -53,9 +53,10 @@ re-enter them each session. Everything else is remembered in
 ## 3. Qlik workspace
 Click **Load apps**, tick the apps you want (picks stick across filtering), then
 use a tab: **Extract metadata · Comparison analysis · Usage analysis · Apply
-master items · Field lineage · Capacity report**. The Capacity tab scans the
-whole tenant, shows a dashboard (billed % gauge, duplicate-reclaim and per-space
-charts, colour-coded action list) **and** writes `capacity_report_*.xlsx`.
+master items · Field lineage · Capacity report · Tenant usage**. The Capacity
+tab scans the whole tenant, shows a dashboard (billed % gauge, duplicate-reclaim
+and per-space charts, colour-coded action list) **and** writes
+`capacity_report_*.xlsx`.
 
 *Apply master items* is the only write path — Dry run is on by default, a backup
 is exported first, and a confirmation dialog appears before any real write.
@@ -79,6 +80,21 @@ The **Field lineage** tab has two independent tools:
 - **Field lineage (trace)** — interactive mode: pick one app and one field to
   see the pipeline that field took *into* this app, optionally extended
   upstream across apps via Qlik's own lineage graph.
+
+The **Tenant usage** tab answers the same two questions as the QVD field usage
+report, but tenant-wide and for exactly what matters for governance: no app
+selection needed — it scans every **published** app (unpublished/personal
+apps are skipped, since nobody consumes reports from them) to find (1) which
+QVDs in the tenant's data-file inventory are read by any published app at all
+(an unreferenced one is a cleanup candidate), and (2) of the fields those apps
+load from QVDs, which are actually **used in a report** — placed on a measure,
+dimension or visual somewhere — rather than merely present in the data model.
+Writes one `tenant_qvd_usage_*.xlsx` (Summary, QVD inventory, Field usage) and
+shows a summary in the panel below. Opens every published app in the tenant,
+so it is slower than the per-app QVD field usage report — expect it to take a
+while on a large tenant. Same caveat as Usage analysis: "used" is detected by
+text-matching expressions, so a field referenced only through a dynamic
+`$(...)` expression can be wrongly marked unused — verify before deleting.
 
 ## 4. Power BI workspace
 - **Collect** — pick a UTC **date range** (From / To, defaults to the last 7 days

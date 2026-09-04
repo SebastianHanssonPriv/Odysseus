@@ -45,6 +45,7 @@ class QlikView(QWidget):
     sig_fields_loaded = Signal(list)
     sig_trace_done = Signal(str, str)
     sig_qvd_usage_done = Signal(str)
+    sig_tenant_usage_done = Signal(str)
     sig_index_built = Signal(int, object)
     sig_capacity_result = Signal(object)
     sig_consistency_result = Signal(object)
@@ -69,6 +70,7 @@ class QlikView(QWidget):
         self.sig_fields_loaded.connect(self._on_fields_loaded)
         self.sig_trace_done.connect(self._on_trace_done)
         self.sig_qvd_usage_done.connect(self._on_qvd_usage_text)
+        self.sig_tenant_usage_done.connect(self._on_tenant_usage_text)
         self.sig_index_built.connect(self._on_index_built)
         self.sig_capacity_result.connect(self._render_capacity)
         self.sig_consistency_result.connect(self._render_consistency)
@@ -457,6 +459,34 @@ class QlikView(QWidget):
         cap_scroll.setWidget(cap_holder)
         capl.addWidget(cap_scroll, 1)
         tabs.addTab(tab_cap, "Capacity report")
+
+        # Tenant QVD & field usage (published apps only)
+        tab_t = QWidget()
+        tl = QVBoxLayout(tab_t)
+        tl.setContentsMargins(0, 10, 0, 0)
+        tc = make_card()
+        tcl = QVBoxLayout(tc)
+        tcl.addWidget(label("TENANT QVD & FIELD USAGE  (published apps only)", "section"))
+        tcl.addWidget(label("Scans every PUBLISHED app in the tenant (unpublished/personal apps are "
+                            "skipped - they aren't distributed to end users). For each QVD: is it read "
+                            "by any published app. For each field a published app loads from a QVD: is "
+                            "it also actually used in a measure, dimension or visual anywhere in that "
+                            "app - not just present in the data model. No app selection needed, but "
+                            "this opens every published app in the tenant, so it can take a while.",
+                            "muted", wrap=True))
+        trow = QHBoxLayout()
+        self.btn_tenant_usage = QPushButton("Scan tenant QVD & field usage")
+        self.btn_tenant_usage.setObjectName("accent")
+        self.btn_tenant_usage.clicked.connect(self._on_tenant_usage)
+        trow.addWidget(self.btn_tenant_usage)
+        trow.addStretch(1)
+        tcl.addLayout(trow)
+        tl.addWidget(tc)
+        self.tenant_usage_panel = QPlainTextEdit()
+        self.tenant_usage_panel.setReadOnly(True)
+        self.tenant_usage_panel.setMinimumHeight(150)
+        tl.addWidget(self.tenant_usage_panel, 1)
+        tabs.addTab(tab_t, "Tenant usage")
         return tabs
 
     def _set_all_exports(self, on):
@@ -670,6 +700,8 @@ class QlikView(QWidget):
             self.btn_trace.setEnabled(True)
         elif which == "qvd_usage":
             self.btn_qvd_usage.setEnabled(True)
+        elif which == "tenant_usage":
+            self.btn_tenant_usage.setEnabled(True)
         elif which == "index":
             self.btn_index.setEnabled(True)
 
@@ -1329,6 +1361,80 @@ class QlikView(QWidget):
             self.sig_error.emit("QVD field usage scan failed", scrub(key, e))
         finally:
             self.sig_done.emit("qvd_usage")
+
+    # ---------------- tenant QVD & field usage ----------------
+    def _on_tenant_usage_text(self, text):
+        self.tenant_usage_panel.setPlainText(text)
+
+    def _on_tenant_usage(self):
+        if self._need_settings():
+            return
+        if not self.output_dir:
+            QMessageBox.warning(self, "Missing settings", "Set an output folder in Settings.")
+            return
+        self.btn_tenant_usage.setEnabled(False)
+        self.shell.busy_begin("Scanning tenant QVD & field usage")
+        self.log("Scanning tenant QVD & field usage (published apps only) ...")
+        threading.Thread(target=self._tenant_usage_worker,
+                         args=(self.tenant, self.api_key, self.output_dir), daemon=True).start()
+
+    def _tenant_usage_worker(self, tenant, key, out_dir):
+        try:
+            self.log("Listing published apps ...")
+            apps = core.list_published_apps(tenant, key)
+            self.log(f"  {len(apps)} published app(s) found.")
+            try:
+                qvd_inventory = {b: m for b, m in core.list_data_files(tenant, key).items()
+                                 if b.endswith(".qvd")}
+            except Exception as e:
+                qvd_inventory = {}
+                self.log(f"  (data file inventory unavailable: {scrub(key, e)})")
+
+            app_rows = []
+            for a in apps:
+                if self.shell.cancel_requested():
+                    self.log("Tenant usage scan cancelled.")
+                    break
+                exp = core.QlikExporter(tenant, key, a["guid"], out_dir, self.shell.sig_log.emit)
+                try:
+                    exp.connect()
+                    app_h = exp.call(-1, "OpenDoc", [a["guid"]])["qReturn"]["qHandle"]
+                    title = exp.call(app_h, "GetAppLayout", [])["qLayout"].get("qTitle", a["guid"])
+                    script = exp.fetch_script(app_h)
+                    model_fields = exp.fetch_model_fields(app_h)
+                    measures = exp.fetch_measures(app_h)
+                    dims = exp.fetch_dimensions(app_h)
+                    variables = exp.fetch_variables(app_h)
+                    objects = exp.fetch_objects(app_h)
+                    tables = core.parse_load_tables(script)
+                    rows = core.analyze_qvd_field_usage(tables, model_fields)
+                    usage_result = core.analyze_usage(measures, dims, variables, objects, model_fields)
+                    core.attach_report_usage(rows, usage_result)
+                    app_rows.append({"title": title, "guid": a["guid"], "rows": rows})
+                    qvds = {r["qvd_file"] for r in rows}
+                    self.log(f"  {title}: {len(qvds)} QVD source(s), {len(rows)} field reference(s)")
+                except Exception as e:
+                    self.log(f"ERROR scanning {a.get('name', a['guid'])}: {scrub(key, e)}")
+                finally:
+                    exp.close()
+
+            if self.shell.cancel_requested():
+                self.log("Tenant usage scan cancelled - no report written.")
+                return
+            if not app_rows:
+                self.log("No published apps scanned.")
+                return
+            qvd_ref_rows = core.cross_reference_qvd_inventory(qvd_inventory, app_rows)
+            text = core.render_tenant_qvd_usage_text(app_rows, qvd_ref_rows)
+            self.sig_tenant_usage_done.emit(text)
+            out_path = core.write_tenant_qvd_usage_report(app_rows, qvd_ref_rows, out_dir,
+                                                           self.shell.sig_log.emit)
+            self.log(f"Tenant QVD & field usage report -> {os.path.basename(out_path)}")
+        except Exception as e:
+            self.log(f"ERROR: {scrub(key, e)}")
+            self.sig_error.emit("Tenant usage scan failed", scrub(key, e))
+        finally:
+            self.sig_done.emit("tenant_usage")
 
     # ---------------- field lineage ----------------
     def _on_fields_loaded(self, names):

@@ -67,6 +67,26 @@ def list_spaces(tenant, api_key):
     return spaces
 
 
+def list_published_apps(tenant, api_key):
+    """list_apps() filtered to apps that have actually been published (app
+    attribute 'publishTime' set - the same signal the Capacity report already
+    reads per app). Unpublished/personal apps aren't distributed to end users,
+    so a tenant-wide scan of what's actually consumed can skip them; this cuts
+    a full scan down to only what matters and to fewer, cheaper engine
+    sessions. One lightweight REST call per app; a call that fails excludes
+    that app rather than guessing its publish state."""
+    apps = list_apps(tenant, api_key)
+    out = []
+    for a in apps:
+        try:
+            attrs = _rest_get(tenant, api_key, f"/api/v1/apps/{a['guid']}").get("attributes", {}) or {}
+        except Exception:
+            continue
+        if attrs.get("publishTime"):
+            out.append(a)
+    return out
+
+
 def list_data_files(tenant, api_key):
     """Best-effort: map data-file basename (lowercased) -> last modified date.
     Depends on tenant/connection access; the caller must handle failures."""
@@ -2136,6 +2156,197 @@ def write_qvd_usage_report(app_rows, out_dir, log):
     if all_rows:
         ds.freeze_panes = "A2"
         ds.auto_filter.ref = f"A1:{get_column_letter(len(detail_headers))}{ds.max_row}"
+
+    out_path = os.path.join(out_dir, f"{base}.xlsx")
+    wb.save(out_path)
+    return out_path
+
+
+# ============================================================
+#  Tenant-wide QVD + report usage (published apps only)
+# ============================================================
+def attach_report_usage(qvd_rows, usage_result):
+    """Enrich each analyze_qvd_field_usage row in place with 'used_in_report':
+    True/False from the app's own report-usage scan (analyze_usage - the same
+    engine behind the Usage analysis tab, which checks every measure,
+    dimension, variable and visual object's expression for the field, not
+    just whether it is present in the model), or None when the field was not
+    found in that scan at all (should not normally happen for a status in
+    QVD_CONFIRMED_STATUSES, since analyze_usage covers every model field)."""
+    used_by_name = {f["name"].lower(): f["used"] for f in usage_result["fields"]["all"]}
+    for r in qvd_rows:
+        r["used_in_report"] = used_by_name.get(r["final_field"].lower())
+    return qvd_rows
+
+
+def cross_reference_qvd_inventory(qvd_inventory, app_rows):
+    """qvd_inventory: {basename: modified_date}, e.g. from list_data_files()
+    filtered to .qvd. app_rows: the per-app QVD-usage scan results. Returns
+    rows [{qvd, modified, referenced, apps}] -- 'referenced' is False for a
+    QVD that exists but that no scanned (published) app's script reads at
+    all, i.e. a cleanup candidate. A QVD referenced by a scanned app but
+    absent from qvd_inventory (e.g. a connection type list_data_files does
+    not enumerate) still gets a row rather than being silently dropped."""
+    referenced_by = {}
+    for ar in app_rows:
+        for r in ar["rows"]:
+            referenced_by.setdefault(r["qvd_file"], set()).add(ar["title"])
+
+    rows = []
+    for qvd, modified in sorted(qvd_inventory.items()):
+        apps = sorted(referenced_by.get(qvd, set()))
+        rows.append({"qvd": qvd, "modified": modified, "referenced": bool(apps), "apps": apps})
+    for qvd, apps in referenced_by.items():
+        if qvd not in qvd_inventory:
+            rows.append({"qvd": qvd, "modified": "", "referenced": True, "apps": sorted(apps)})
+    return rows
+
+
+def render_tenant_qvd_usage_text(app_rows, qvd_ref_rows):
+    total_fields = sum(len(ar["rows"]) for ar in app_rows)
+    confirmed = sum(1 for ar in app_rows for r in ar["rows"] if r["status"] in QVD_CONFIRMED_STATUSES)
+    used_in_report = sum(1 for ar in app_rows for r in ar["rows"] if r.get("used_in_report"))
+    unreferenced = [r for r in qvd_ref_rows if not r["referenced"]]
+    lines = [
+        f"TENANT QVD & FIELD USAGE - {len(app_rows)} published app(s) scanned",
+        f"  QVDs: {len(qvd_ref_rows)} total, {len(qvd_ref_rows) - len(unreferenced)} referenced by "
+        f"at least one published app, {len(unreferenced)} not referenced by any",
+        f"  Fields: {total_fields} scanned, {confirmed} confirmed in a model, {used_in_report} of "
+        "those actually used in a report (measure/dimension/visual)",
+        "",
+    ]
+    if unreferenced:
+        lines.append("QVDs not referenced by any published app (candidates for cleanup):")
+        for r in unreferenced[:20]:
+            lines.append(f"    - {r['qvd']}")
+        if len(unreferenced) > 20:
+            lines.append(f"    ... and {len(unreferenced) - 20} more - see the Excel report.")
+        lines.append("")
+    lines.append("Full detail is in the Excel report.")
+    return "\n".join(lines)
+
+
+def _style_header_row(ws, row, ncols, font, fill):
+    for c in range(1, ncols + 1):
+        ws.cell(row=row, column=c).font = font
+        ws.cell(row=row, column=c).fill = fill
+
+
+def write_tenant_qvd_usage_report(app_rows, qvd_ref_rows, out_dir, log):
+    """Combined tenant-wide workbook: Summary, QVD inventory (every QVD, and
+    whether any published app reads it), and Field usage (every QVD field
+    confirmed in a model, and whether it is also actually used in a report)."""
+    os.makedirs(out_dir, exist_ok=True)
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    base = f"tenant_qvd_usage_{stamp}"
+
+    field_headers = ["App", "QVD file", "Target table", "Source field (in QVD)",
+                     "Final field (in model)", "Type", "Confirmed status", "Used in a report"]
+    field_rows = []
+    for ar in app_rows:
+        for r in ar["rows"]:
+            used = r.get("used_in_report")
+            field_rows.append([ar["title"], r["qvd_file"], r["target_table"], r["source_field"],
+                               r["final_field"], "Passthrough" if r["passthrough"] else "Expression",
+                               r["status"], "Yes" if used else ("No" if used is False else "")])
+
+    inv_headers = ["QVD file", "Last modified", "Referenced by any published app", "Referencing app(s)"]
+    inv_rows = [[r["qvd"], r["modified"], "Yes" if r["referenced"] else "No", "; ".join(r["apps"])]
+               for r in qvd_ref_rows]
+
+    total_fields = sum(len(ar["rows"]) for ar in app_rows)
+    confirmed = sum(1 for ar in app_rows for r in ar["rows"] if r["status"] in QVD_CONFIRMED_STATUSES)
+    used_in_report = sum(1 for ar in app_rows for r in ar["rows"] if r.get("used_in_report"))
+    unreferenced = sum(1 for r in qvd_ref_rows if not r["referenced"])
+    summary_rows = [
+        ["Published apps scanned", len(app_rows)],
+        ["QVDs in tenant inventory", len(qvd_ref_rows)],
+        ["QVDs referenced by at least one published app", len(qvd_ref_rows) - unreferenced],
+        ["QVDs not referenced by any published app", unreferenced],
+        ["Fields scanned (QVD LOAD references)", total_fields],
+        ["Fields confirmed present in a model", confirmed],
+        ["  of which actually used in a report", used_in_report],
+        ["Generated", datetime.datetime.now().strftime("%Y-%m-%d %H:%M UTC")],
+    ]
+
+    warn = ("READ FIRST - results are CANDIDATES, not gospel (same caveat as the per-app Usage "
+            "analysis tab): 'Used in a report' is detected by text-matching every measure, "
+            "dimension and visual object's expression against the field name, so a field only "
+            "referenced through a dynamic $(...) expression may be wrongly marked unused - verify "
+            "before treating anything as safe to remove. Only PUBLISHED apps were scanned; a "
+            "personal/unpublished app reading a QVD does not count as that QVD being used.")
+
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from openpyxl.utils import get_column_letter
+    except Exception:
+        paths = []
+        for suffix, headers, rows in [("summary", ["Metric", "Value"], summary_rows),
+                                      ("qvd_inventory", inv_headers, inv_rows),
+                                      ("field_usage", field_headers, field_rows)]:
+            pth = os.path.join(out_dir, f"{base}_{suffix}.csv")
+            with open(pth, "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f)
+                w.writerow(headers)
+                w.writerows(rows)
+            paths.append(pth)
+        log("openpyxl not installed - wrote CSV files instead of one workbook.")
+        return paths[0]
+
+    wb = Workbook()
+    head_font = Font(bold=True, color="FFFFFF")
+    head_fill = PatternFill("solid", fgColor="315C6D")
+    warn_font = Font(bold=True, color="B00020")
+    wrap = Alignment(wrap_text=True, vertical="top")
+    bad_fill = PatternFill("solid", fgColor="F7D9DE")
+
+    ws = wb.active
+    ws.title = "Summary"
+    ws.append(["IMPORTANT - PLEASE READ"])
+    ws["A1"].font = warn_font
+    ws.append([warn])
+    ws.cell(row=ws.max_row, column=1).font = warn_font
+    ws.cell(row=ws.max_row, column=1).alignment = wrap
+    ws.append([])
+    ws.append(["Metric", "Value"])
+    _style_header_row(ws, ws.max_row, 2, head_font, head_fill)
+    for r in summary_rows:
+        ws.append(r)
+    ws.column_dimensions["A"].width = 55
+    ws.column_dimensions["B"].width = 20
+
+    inv = wb.create_sheet("QVD inventory")
+    inv.append(inv_headers)
+    _style_header_row(inv, 1, len(inv_headers), head_font, head_fill)
+    ref_col = inv_headers.index("Referenced by any published app")
+    for r in inv_rows:
+        rn = inv.max_row + 1
+        inv.append(r)
+        if r[ref_col] == "No":
+            for c in range(1, len(inv_headers) + 1):
+                inv.cell(row=rn, column=c).fill = bad_fill
+    for i, w in enumerate((30, 18, 16, 50), 1):
+        inv.column_dimensions[get_column_letter(i)].width = w
+    if inv_rows:
+        inv.freeze_panes = "A2"
+        inv.auto_filter.ref = f"A1:{get_column_letter(len(inv_headers))}{inv.max_row}"
+
+    fs = wb.create_sheet("Field usage")
+    fs.append(field_headers)
+    _style_header_row(fs, 1, len(field_headers), head_font, head_fill)
+    used_col = field_headers.index("Used in a report")
+    for r in field_rows:
+        rn = fs.max_row + 1
+        fs.append(r)
+        if r[used_col] == "No":
+            for c in range(1, len(field_headers) + 1):
+                fs.cell(row=rn, column=c).fill = bad_fill
+    for i, w in enumerate((26, 26, 20, 22, 22, 14, 24, 16), 1):
+        fs.column_dimensions[get_column_letter(i)].width = w
+    if field_rows:
+        fs.freeze_panes = "A2"
+        fs.auto_filter.ref = f"A1:{get_column_letter(len(field_headers))}{fs.max_row}"
 
     out_path = os.path.join(out_dir, f"{base}.xlsx")
     wb.save(out_path)
