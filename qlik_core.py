@@ -2038,6 +2038,7 @@ def write_qvd_usage_report(app_rows, out_dir, log):
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     base = f"qvd_field_usage_{stamp}"
 
+    has_chain = any(r.get("chain") for ar in app_rows for r in ar["rows"])
     all_rows, summary_rows = [], []
     for ar in app_rows:
         rows = ar["rows"]
@@ -2048,21 +2049,30 @@ def write_qvd_usage_report(app_rows, out_dir, log):
         summary_rows.append([ar["title"], len({r["qvd_file"] for r in rows}),
                              len(rows), confirmed, not_found, other, wild])
         for r in rows:
-            all_rows.append([ar["title"], r["qvd_file"], r["target_table"],
-                             r["source_field"], r["final_field"],
-                             "Passthrough" if r["passthrough"] else "Expression",
-                             r["status"]])
+            row = [ar["title"], r["qvd_file"], r["target_table"],
+                  r["source_field"], r["final_field"],
+                  "Passthrough" if r["passthrough"] else "Expression",
+                  r["status"]]
+            if has_chain:
+                row += [r.get("origin_label") or "", r.get("chain") or ""]
+            all_rows.append(row)
 
     warn = ("READ FIRST - this is a best-effort text-level scan of the load script, not a full "
             "Qlik parser: control-flow blocks (IF/FOR/SUB), $(variable) FROM paths, and RENAME "
             "FIELDS USING table-driven renames are not evaluated, and an unlabeled table's implicit "
             "name is guessed from its own source file. 'Not found in final model' means the field "
-            "was not seen under this name in the live model - verify before treating it as unused.")
+            "was not seen under this name in the live model - verify before treating it as unused."
+            + (" 'True origin'/'Chain' are resolved once per QVD (using one of its confirmed "
+               "fields), not per field - if a QVD is built from more than one upstream table, "
+               "every field of that QVD shows the same chain even though a specific column may "
+               "actually come from a different upstream source." if has_chain else ""))
 
     summary_headers = ["App", "QVD files", "Fields scanned", "Confirmed", "Not found in model",
                        "Found in a different table", "Wildcard (unresolved)"]
     detail_headers = ["App", "QVD file", "Target table", "Source field (in QVD)",
                       "Final field (in model)", "Type", "Status"]
+    if has_chain:
+        detail_headers += ["True origin", "Chain (origin -> ... -> this app)"]
 
     try:
         from openpyxl import Workbook
@@ -2112,14 +2122,16 @@ def write_qvd_usage_report(app_rows, out_dir, log):
     for c in range(1, len(detail_headers) + 1):
         ds.cell(row=1, column=c).font = head_font
         ds.cell(row=1, column=c).fill = head_fill
+    status_col = detail_headers.index("Status")
     for r in all_rows:
         rn = ds.max_row + 1
         ds.append(r)
-        fill = status_fill.get(r[-1])
+        fill = status_fill.get(r[status_col])
         if fill:
             for c in range(1, len(detail_headers) + 1):
                 ds.cell(row=rn, column=c).fill = fill
-    for i, w in enumerate((26, 26, 20, 22, 22, 14, 24), 1):
+    widths = [26, 26, 20, 22, 22, 14, 24] + ([26, 60] if has_chain else [])
+    for i, w in enumerate(widths, 1):
         ds.column_dimensions[get_column_letter(i)].width = w
     if all_rows:
         ds.freeze_panes = "A2"
@@ -2616,3 +2628,41 @@ def assemble_pipeline_nodes(this_pipe, this_app_title, this_meta, hops):
         push({"kind": "Table", "label": st["table"]})
     push({"kind": "Report", "label": this_app_title, "meta": _meta_str(this_meta)})
     return nodes
+
+
+def resolve_qvd_chain(qvd, field_name, tenant, api_key, this_app_guid, open_app, meta_fn=None,
+                      log=None, max_hops=6):
+    """For one QVD this app reads and one of its fields, resolve the full
+    origin chain across however many QVD-producer app hops it takes -- the
+    same engine the interactive Field lineage 'Trace' button uses for one
+    field at a time (Qlik's own native lineage graph to find each producer
+    app, then that app's own load script to find ITS source in turn).
+
+    Returns {"origin_kind", "origin_label", "chain", "note"}. origin_* are
+    None when no producing app was found in Qlik's lineage graph (the QVD is
+    either genuinely terminal -- e.g. hand-uploaded -- or outside this
+    tenant's tracked lineage), in which case `note` says so; a chain that
+    reaches a producer app but can't resolve THAT app's own source still
+    returns a chain (ending at that app), with `note` explaining the stop."""
+    try:
+        graph = fetch_native_lineage(tenant, api_key, this_app_guid)
+    except Exception as e:
+        return {"origin_kind": None, "origin_label": None, "chain": "",
+                "note": f"native lineage unavailable: {e}"}
+
+    hops = trace_upstream_apps(graph, {qvd}, field_name, open_app, meta_fn, log, max_hops=max_hops)
+    if not hops:
+        return {"origin_kind": None, "origin_label": None, "chain": "",
+                "note": "no producing app found in Qlik's lineage graph for this QVD"}
+
+    furthest = hops[-1]  # trace_upstream_apps returns hops nearest-first
+    pipe = furthest.get("pipe")
+    origin = pipe_origin_node(pipe) if pipe and pipe.get("found") else None
+    origin_kind = origin["kind"] if origin else "Qlik app"
+    origin_label = origin["label"] if origin else furthest["title"]
+
+    chain = " -> ".join([f"{origin_kind}: {origin_label}"] + [f"[{h['title']}]" for h in reversed(hops)])
+    note = None if origin else (
+        f"chain stops at app '{furthest['title']}' - its own source could not be resolved "
+        "from its load script")
+    return {"origin_kind": origin_kind, "origin_label": origin_label, "chain": chain, "note": note}

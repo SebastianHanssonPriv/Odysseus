@@ -373,6 +373,10 @@ class QlikView(QWidget):
                             "one combined Excel workbook (qvd_field_usage_*.xlsx) and shows a summary "
                             "below - treat 'not found' fields as a prioritized worklist, not a verdict.",
                             "muted", wrap=True))
+        self.chk_qvd_upstream = QCheckBox("Also trace upstream to the true source (database table or "
+                                          "file) for confirmed fields - slower, opens each QVD's "
+                                          "producing app via Qlik's own lineage graph")
+        lcl.addWidget(self.chk_qvd_upstream)
         qrow = QHBoxLayout()
         self.btn_qvd_usage = QPushButton("Scan QVD field usage")
         self.btn_qvd_usage.setObjectName("accent")
@@ -1245,10 +1249,48 @@ class QlikView(QWidget):
         self.shell.busy_begin("Scanning QVD field usage")
         self.log(f"Scanning QVD field usage for {len(targets)} app(s) ...")
         threading.Thread(target=self._qvd_usage_worker,
-                         args=(self.tenant, self.api_key, self.output_dir, targets), daemon=True).start()
+                         args=(self.tenant, self.api_key, self.output_dir, targets,
+                               self.chk_qvd_upstream.isChecked()), daemon=True).start()
 
-    def _qvd_usage_worker(self, tenant, key, out_dir, targets):
+    def _attach_upstream_chains(self, rows, tenant, key, this_app_guid, chain_cache):
+        """Resolve each distinct confirmed QVD's true origin once - cached
+        across the whole scan, since the same QVD is often shared by several
+        apps/fields - and attach it to every row sourced from that QVD."""
+        def open_app(guid, _t=tenant, _k=key):
+            ex = core.QlikExporter(_t, _k, guid, self.output_dir or os.path.expanduser("~"),
+                                   self.shell.sig_log.emit)
+            try:
+                ex.connect()
+                ah = ex.call(-1, "OpenDoc", [guid])["qReturn"]["qHandle"]
+                lay = ex.call(ah, "GetAppLayout", [])["qLayout"]
+                return {"title": lay.get("qTitle", guid), "reload": lay.get("qLastReloadTime", ""),
+                        "script": ex.fetch_script(ah)}
+            except Exception as oe:
+                self.shell.sig_log.emit(f"  (could not open upstream app: {scrub(key, oe)})")
+                return None
+            finally:
+                ex.close()
+
+        for r in rows:
+            if r["status"] not in core.QVD_CONFIRMED_STATUSES:
+                continue
+            qvd = r["qvd_file"]
+            if qvd not in chain_cache:
+                # ponytail: cached per QVD, not per (QVD, field) - if the QVD is built
+                # from more than one upstream table, every field shows the same chain.
+                # Upgrade to a (qvd, field) cache key if that turns out to matter in practice.
+                self.shell.sig_log.emit(f"  tracing upstream source for {qvd} ...")
+                chain_cache[qvd] = core.resolve_qvd_chain(
+                    qvd, r["final_field"], tenant, key, this_app_guid, open_app,
+                    log=self.shell.sig_log.emit)
+            resolved = chain_cache[qvd]
+            r["origin_kind"] = resolved["origin_kind"]
+            r["origin_label"] = resolved["origin_label"]
+            r["chain"] = resolved["chain"]
+
+    def _qvd_usage_worker(self, tenant, key, out_dir, targets, trace_upstream):
         app_rows = []
+        chain_cache = {}  # qvd_file -> resolved chain dict, shared across all apps in this run
         try:
             for a in targets:
                 if self.shell.cancel_requested():
@@ -1263,6 +1305,8 @@ class QlikView(QWidget):
                     model_fields = exp.fetch_model_fields(app_h)
                     tables = core.parse_load_tables(script)
                     rows = core.analyze_qvd_field_usage(tables, model_fields)
+                    if trace_upstream:
+                        self._attach_upstream_chains(rows, tenant, key, a["guid"], chain_cache)
                     app_rows.append({"title": title, "guid": a["guid"], "rows": rows})
                     qvds = {r["qvd_file"] for r in rows}
                     self.log(f"  {title}: {len(qvds)} QVD source(s), {len(rows)} field reference(s)")

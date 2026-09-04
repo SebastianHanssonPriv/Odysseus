@@ -69,7 +69,13 @@ The **Field lineage** tab has two independent tools:
   one combined `qvd_field_usage_*.xlsx` and shows a summary in the panel
   below — treat "not found" fields as a prioritized worklist, not a verdict,
   since this is a text-level script scan (see the workbook's warning sheet
-  for exactly what it does not evaluate).
+  for exactly what it does not evaluate). Tick "Also trace upstream to the
+  true source" to additionally resolve each confirmed QVD's real origin —
+  a database table/view, or wherever the chain of Qlik apps producing that
+  QVD ultimately stops — mirroring the Power BI Model lineage tab's goal
+  (source, all the way to the final model) but for Qlik. This is slower: it
+  opens every QVD's producing app via Qlik's own lineage graph, one time per
+  distinct QVD across the whole scan (not per field).
 - **Field lineage (trace)** — interactive mode: pick one app and one field to
   see the pipeline that field took *into* this app, optionally extended
   upstream across apps via Qlik's own lineage graph.
