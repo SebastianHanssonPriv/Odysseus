@@ -97,6 +97,119 @@ def list_published_apps(tenant, api_key):
     return out
 
 
+def diagnose_app_visibility(tenant, api_key, app_guid, consumer_guid=None, log=None):
+    """One-shot diagnostic for a single suspected blind spot: is THIS API
+    key's identity able to see app_guid at all, and at which layer does it
+    fail? Built to test the hypothesis that an app in another user's
+    PERSONAL space is invisible to /api/v1/items (Qlik Cloud's Items API is
+    scoped by space membership, and a Personal space has exactly one member
+    -- its owner) even to a tenant-admin key -- while a direct
+    /api/v1/apps/{id} lookup or an Engine API session might behave
+    differently. This is a hypothesis about Qlik Cloud's platform behavior,
+    not something verified against a live tenant by this codebase -- that is
+    exactly what running this function against a real app GUID settles.
+
+    Pass consumer_guid (an app that reads a QVD app_guid produces) to also
+    check whether Qlik's own native lineage graph reveals app_guid as a
+    producer node at all -- if it doesn't, scan_tenant_lineage would never
+    even attempt to open it, regardless of what the checks below find.
+
+    Returns an ordered list of (check_name, ok, detail); ok is True/False,
+    or None for a check that was skipped."""
+    results = []
+
+    def rec(name, ok, detail):
+        results.append((name, ok, detail))
+        if log:
+            tag = "SKIP" if ok is None else ("OK" if ok else "FAIL")
+            log(f"  [{tag}] {name}: {detail}")
+
+    try:
+        apps = list_apps(tenant, api_key)
+        found = next((a for a in apps if a["guid"] == app_guid), None)
+        if found:
+            rec("Items API (/api/v1/items) - space-membership scoped", True,
+               f"found - name='{found['name']}', spaceId='{found['space_id'] or '(none = Personal)'}'")
+        else:
+            rec("Items API (/api/v1/items) - space-membership scoped", False,
+               f"NOT found among the {len(apps)} app(s) this key can list this way")
+    except Exception as e:
+        rec("Items API (/api/v1/items) - space-membership scoped", False, f"call failed: {e}")
+
+    try:
+        attrs = _rest_get(tenant, api_key, f"/api/v1/apps/{app_guid}").get("attributes", {}) or {}
+        rec("Direct REST lookup (/api/v1/apps/{guid})", True,
+           f"found - name='{attrs.get('name', '')}', "
+           f"spaceId='{attrs.get('spaceId') or '(none = Personal)'}', "
+           f"publishTime='{attrs.get('publishTime', '')}'")
+    except Exception as e:
+        rec("Direct REST lookup (/api/v1/apps/{guid})", False, f"call failed: {e}")
+
+    try:
+        exp = QlikExporter(tenant, api_key, app_guid, "", log or print)
+        try:
+            exp.connect()
+            app_h = exp.call(-1, "OpenDoc", [app_guid])["qReturn"]["qHandle"]
+            title = exp.call(app_h, "GetAppLayout", [])["qLayout"].get("qTitle", app_guid)
+            rec("Engine API session (OpenDoc)", True, f"opened successfully - title='{title}'")
+        finally:
+            exp.close()
+    except Exception as e:
+        rec("Engine API session (OpenDoc)", False, f"could not open: {e}")
+
+    if consumer_guid:
+        try:
+            graph = fetch_native_lineage(tenant, api_key, consumer_guid)
+            nodes = graph.get("nodes", {})
+            hit = any(_guid_from_qri(q) == app_guid for q in nodes)
+            rec("Native lineage graph (walked from consumer app)", hit,
+               (f"app_guid appears as a node in {consumer_guid}'s lineage graph"
+                if hit else
+                f"app_guid does NOT appear anywhere in {consumer_guid}'s lineage graph")
+               + f" ({len(nodes)} node(s) total)")
+        except Exception as e:
+            rec("Native lineage graph (walked from consumer app)", False, f"call failed: {e}")
+    else:
+        rec("Native lineage graph (walked from consumer app)", None,
+           "skipped - no consumer app GUID given")
+
+    return results
+
+
+def render_app_visibility_text(app_guid, results):
+    lines = [f"APP VISIBILITY DIAGNOSTIC - {app_guid}", ""]
+    for name, ok, detail in results:
+        tag = "SKIP" if ok is None else ("OK" if ok else "FAIL")
+        lines.append(f"  [{tag}] {name}")
+        lines.append(f"        {detail}")
+    lines.append("")
+    items_ok = next((ok for n, ok, _ in results if n.startswith("Items API")), None)
+    engine_ok = next((ok for n, ok, _ in results if n.startswith("Engine API")), None)
+    rest_ok = next((ok for n, ok, _ in results if n.startswith("Direct REST")), None)
+    if items_ok is False and (rest_ok or engine_ok):
+        lines.append("VERDICT: confirmed -- this app is invisible to the Items API this tool's "
+                     "app lists are built from (list_apps/list_published_apps), but reachable "
+                     "through at least one other route above. Every feature that starts from "
+                     "the app list (Extract metadata, Comparison/Usage analysis, Capacity, and "
+                     "the Tenant usage scan's root-app discovery) will never see it as a "
+                     "candidate on its own -- it can only be reached today if Qlik's native "
+                     "lineage graph happens to reference it as a producer from an app that IS "
+                     "visible.")
+    elif items_ok is False and not rest_ok and not engine_ok:
+        lines.append("VERDICT: this app is invisible to every route this tool has -- Items API, "
+                     "direct REST lookup, and Engine API session all failed. This API key's "
+                     "identity has no visibility into it at all right now (permissions, not a "
+                     "code gap); it would need to be shared with this key's identity/space, or "
+                     "the API key would need to belong to someone with direct access, before any "
+                     "of this tool's Qlik features can reach it.")
+    elif items_ok:
+        lines.append("VERDICT: this app IS visible via the Items API - the Personal-space "
+                     "visibility hypothesis does not apply to it specifically (it may not "
+                     "actually be in a Personal space, or this key's identity has broader access "
+                     "than assumed). Re-check which space it's actually in.")
+    return "\n".join(lines)
+
+
 def list_data_files(tenant, api_key):
     """Best-effort: map data-file basename (lowercased) -> last modified date.
     Depends on tenant/connection access; the caller must handle failures."""

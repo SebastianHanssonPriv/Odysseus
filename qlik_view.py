@@ -46,6 +46,7 @@ class QlikView(QWidget):
     sig_trace_done = Signal(str, str)
     sig_qvd_usage_done = Signal(str)
     sig_tenant_usage_done = Signal(str)
+    sig_diag_visibility_done = Signal(str)
     sig_index_built = Signal(int, object)
     sig_capacity_result = Signal(object)
     sig_consistency_result = Signal(object)
@@ -71,6 +72,7 @@ class QlikView(QWidget):
         self.sig_trace_done.connect(self._on_trace_done)
         self.sig_qvd_usage_done.connect(self._on_qvd_usage_text)
         self.sig_tenant_usage_done.connect(self._on_tenant_usage_text)
+        self.sig_diag_visibility_done.connect(self._on_diag_visibility_text)
         self.sig_index_built.connect(self._on_index_built)
         self.sig_capacity_result.connect(self._render_capacity)
         self.sig_consistency_result.connect(self._render_consistency)
@@ -496,6 +498,42 @@ class QlikView(QWidget):
         self.tenant_usage_panel.setReadOnly(True)
         self.tenant_usage_panel.setMinimumHeight(150)
         tl.addWidget(self.tenant_usage_panel, 1)
+
+        dc = make_card()
+        dcl = QVBoxLayout(dc)
+        dcl.addWidget(label("DIAGNOSE APP VISIBILITY", "section"))
+        dcl.addWidget(label("A suspected app - e.g. one you've confirmed sits in someone's Personal "
+                            "space - can be invisible to this tool's normal app list without ever "
+                            "showing up as an error: this checks, one layer at a time, whether THIS "
+                            "API key can see it at all (Items API - what every app list in this tool "
+                            "is built from), reach it directly by GUID, open it via the Engine API, "
+                            "and whether it shows up in another app's native lineage graph as a "
+                            "producer.", "muted", wrap=True))
+        dg = QGridLayout()
+        dg.addWidget(label("App GUID to test", "muted"), 0, 0)
+        self.ed_diag_guid = QLineEdit()
+        self.ed_diag_guid.setPlaceholderText("the suspected app's GUID")
+        dg.addWidget(self.ed_diag_guid, 0, 1)
+        dg.addWidget(label("Consumer app GUID (optional)", "muted"), 1, 0)
+        self.ed_diag_consumer = QLineEdit()
+        self.ed_diag_consumer.setPlaceholderText("an app known to read a QVD it produces - checks "
+                                                 "the native lineage graph too")
+        dg.addWidget(self.ed_diag_consumer, 1, 1)
+        dg.setColumnStretch(1, 1)
+        dcl.addLayout(dg)
+        drow = QHBoxLayout()
+        self.btn_diag_visibility = QPushButton("Run diagnostic")
+        self.btn_diag_visibility.setObjectName("accent")
+        self.btn_diag_visibility.clicked.connect(self._on_diag_visibility)
+        drow.addWidget(self.btn_diag_visibility)
+        drow.addStretch(1)
+        dcl.addLayout(drow)
+        tl.addWidget(dc)
+        self.diag_visibility_panel = QPlainTextEdit()
+        self.diag_visibility_panel.setReadOnly(True)
+        self.diag_visibility_panel.setMinimumHeight(120)
+        tl.addWidget(self.diag_visibility_panel)
+
         tabs.addTab(tab_t, "Tenant usage")
         return tabs
 
@@ -714,6 +752,8 @@ class QlikView(QWidget):
             self.btn_tenant_usage.setEnabled(True)
         elif which == "index":
             self.btn_index.setEnabled(True)
+        elif which == "diag_visibility":
+            self.btn_diag_visibility.setEnabled(True)
 
     # ---------------- export ----------------
     def _on_run(self):
@@ -1461,6 +1501,37 @@ class QlikView(QWidget):
             self.sig_error.emit("Tenant usage scan failed", scrub(key, e))
         finally:
             self.sig_done.emit("tenant_usage")
+
+    # ---------------- diagnose app visibility ----------------
+    def _on_diag_visibility_text(self, text):
+        self.diag_visibility_panel.setPlainText(text)
+
+    def _on_diag_visibility(self):
+        if self._need_settings():
+            return
+        guid = self.ed_diag_guid.text().strip()
+        if not guid:
+            QMessageBox.warning(self, "Missing GUID", "Enter the suspected app's GUID.")
+            return
+        consumer = self.ed_diag_consumer.text().strip() or None
+        self.btn_diag_visibility.setEnabled(False)
+        self.shell.busy_begin("Diagnosing app visibility")
+        self.log(f"Diagnosing visibility for app {guid} ...")
+        threading.Thread(target=self._diag_visibility_worker,
+                         args=(self.tenant, self.api_key, guid, consumer), daemon=True).start()
+
+    def _diag_visibility_worker(self, tenant, key, guid, consumer):
+        try:
+            results = core.diagnose_app_visibility(tenant, key, guid, consumer_guid=consumer,
+                                                    log=self.shell.sig_log.emit)
+            text = core.render_app_visibility_text(guid, results)
+            self.sig_diag_visibility_done.emit(text)
+            self.log("Diagnostic complete - see the panel below for the verdict.")
+        except Exception as e:
+            self.log(f"ERROR: {scrub(key, e)}")
+            self.sig_error.emit("Visibility diagnostic failed", scrub(key, e))
+        finally:
+            self.sig_done.emit("diag_visibility")
 
     # ---------------- field lineage ----------------
     def _on_fields_loaded(self, names):

@@ -133,6 +133,26 @@ text-matching expressions, so a field referenced only through a dynamic
 Space type is read from Qlik Cloud's Spaces API as-is; confirm actual access
 level in the Qlik admin console before relying on it.
 
+**Known blind spot — apps in another user's Personal space.** Qlik Cloud's
+Items API (what every app list in this tool, including this scan's root-app
+discovery, is built from) is scoped by space membership, and a Personal
+space has exactly one member — its owner. This API key, tenant-admin or not,
+likely cannot see an app sitting in someone else's Personal space at all —
+not "with less detail," just never listed — so an extractor/staging app
+placed there can be invisible to every Qlik feature in this tool, with no
+error, unless it happens to surface as a producer node in another (visible)
+app's native lineage graph. **Diagnose app visibility**, below the Tenant
+usage panel, tests one specific app GUID you already suspect against four
+layers — the Items API, a direct REST lookup by GUID, an Engine API session,
+and (optionally, given a downstream consumer app's GUID) whether it appears
+in that consumer's native lineage graph at all — and prints a verdict. This
+confirms or rules out the hypothesis for that one app; it does not (yet)
+enumerate every Personal-space app tenant-wide. If confirmed, the real fix is
+organizational: move the app into a shared/managed space with proper
+delegated ownership, since a business-critical extractor tied to one
+person's account lifecycle is a continuity risk independent of what this
+tool can see.
+
 ## 4. Power BI workspace
 - **Collect** — pick a UTC **date range** (From / To, defaults to the last 7 days
   up to yesterday) and pull each day. Days already collected are skipped, so
