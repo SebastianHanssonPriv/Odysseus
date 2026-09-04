@@ -247,8 +247,12 @@ class PowerBIView(QWidget):
                             "and mashup expressions' enabled, or every table comes back as "
                             "no_expression_available (see the Excel report's warning sheet). Writes "
                             "one combined workbook (model_lineage_*.xlsx) listing, for each table, "
-                            "its source table/view and - where the M code makes it explicit - which "
-                            "fields.", "muted", wrap=True))
+                            "its source table/view, which fields where the M code makes it explicit, "
+                            "and - for every model column - whether it's referenced by a measure or "
+                            "calculated column's DAX expression anywhere in the dataset (the closest "
+                            "proxy to 'used in a report' available without Power BI exposing visual/"
+                            "page content via API - a raw column placed directly on a visual with no "
+                            "calculation involved can't be detected this way).", "muted", wrap=True))
         mrow = QHBoxLayout()
         self.btn_lineage = QPushButton("Scan model lineage")
         self.btn_lineage.setObjectName("accent")

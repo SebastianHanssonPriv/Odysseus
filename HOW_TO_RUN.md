@@ -125,13 +125,21 @@ actual access level in the Qlik admin console before relying on it.
   every semantic model, resolves its warehouse source — direct, or chased
   through a Gen1 dataflow — from each table's actual Power Query M code, and
   the specific fields kept where the M code makes that explicit (a native
-  SQL `Query=` passthrough or an explicit `Table.SelectColumns`). Writes one
-  `model_lineage_*.xlsx` and shows a status summary in the panel below.
-  **Requires** the tenant admin setting "Enhance admin APIs responses with
-  DAX and mashup expressions" (Admin portal → Tenant settings) — without it
-  every table comes back `no_expression_available`. Gen1 dataflows only,
-  matching the current environment — a baseline ahead of the move to Fabric
-  and Gen2 dataflows; see model_lineage.py if that adds Gen2 support later.
+  SQL `Query=` passthrough or an explicit `Table.SelectColumns`). Also, for
+  every column the Scanner API lists on the model (independent of whether the
+  M code above was resolvable), whether it's referenced by a measure or
+  calculated column's DAX expression anywhere in its dataset — the closest
+  proxy to "used in a report" available: Power BI's Admin APIs expose no
+  report/visual content at all (unlike Qlik's Engine API), so a raw column
+  placed directly on a visual with no calculation involved cannot be
+  detected this way, and a "No" is a candidate to verify by hand, not a
+  verdict. Writes one `model_lineage_*.xlsx` (Summary, Model lineage, Column
+  usage) and shows a status summary in the panel below. **Requires** the
+  tenant admin setting "Enhance admin APIs responses with DAX and mashup
+  expressions" (Admin portal → Tenant settings) — without it every table
+  comes back `no_expression_available`. Gen1 dataflows only, matching the
+  current environment — a baseline ahead of the move to Fabric and Gen2
+  dataflows; see model_lineage.py if that adds Gen2 support later.
 
 ### Run it daily (unattended) — until Fabric takes over
 There is no automatic collection yet. Two ways to keep the daily history flowing:

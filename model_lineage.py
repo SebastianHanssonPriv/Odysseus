@@ -14,6 +14,7 @@ from __future__ import annotations
 import csv
 import datetime
 import os
+import re
 from dataclasses import asdict, dataclass, field
 
 from dataflow_admin import export_dataflow
@@ -36,6 +37,7 @@ class TableSourceResult:
     status: str
     hops: list[dict] = field(default_factory=list)
     direct_sources: list[dict] = field(default_factory=list)
+    column_usage: list[dict] = field(default_factory=list)
     note: str | None = None
 
 
@@ -219,6 +221,45 @@ def scan_model_lineage(client, scan_timeout_seconds=600, cancel_check=None, log=
     return results
 
 
+_DAX_BRACKET_RE = re.compile(r"\[([^\]]+)\]")
+
+
+def dax_referenced_fields(tables):
+    """Every column name referenced by any calculated column or measure's
+    DAX expression anywhere in a dataset's tables (DAX allows cross-table
+    references, e.g. 'Orders'[Amount], so this is scoped to the whole
+    dataset, not just one table). Returns a lowercased set.
+
+    This is the closest signal available from Power BI's Admin APIs to
+    "used in a report": unlike Qlik's Engine API, Power BI's Admin APIs
+    expose no visual/report-page content, so a raw column placed directly on
+    a visual with no calculation involved cannot be detected at all -- a
+    'not referenced' column is a candidate to verify, not a verdict. Same
+    text-matching caveat as Qlik's Usage analysis: a column named only
+    inside a string literal, or via a name built from a DAX variable, would
+    be missed or falsely matched -- this is a scan, not an evaluator."""
+    refs = set()
+    for t in tables:
+        for col in (t.get("columns") or []):
+            expr = col.get("expression")
+            if expr:
+                refs |= {m.group(1).strip().lower() for m in _DAX_BRACKET_RE.finditer(expr)}
+        for m_ in (t.get("measures") or []):
+            expr = m_.get("expression")
+            if expr:
+                refs |= {m.group(1).strip().lower() for m in _DAX_BRACKET_RE.finditer(expr)}
+    return refs
+
+
+def _column_usage_for_table(table, dax_refs):
+    """Every column the Scanner API lists on this model table (from dataset
+    schema detail, independent of whether this table's own warehouse source
+    could be resolved), and whether it is DAX-referenced anywhere in the
+    dataset."""
+    return [{"column": c.get("name", ""), "used_in_dax": (c.get("name") or "").lower() in dax_refs}
+           for c in (table.get("columns") or []) if c.get("name")]
+
+
 def _resolve_workspace_datasets(workspace, dataflow_cache, log):
     workspace_id = workspace.get("id", "")
     workspace_name = workspace.get("name", "")
@@ -236,6 +277,7 @@ def _resolve_workspace_datasets(workspace, dataflow_cache, log):
             )))
             continue
         dataset_siblings = _dataset_sibling_expressions(tables)
+        dax_refs = dax_referenced_fields(tables)
 
         for table in tables:
             table_name = table.get("name", "")
@@ -251,6 +293,7 @@ def _resolve_workspace_datasets(workspace, dataflow_cache, log):
                     workspace_id, workspace_name, dataset_id, dataset_name, table_name,
                     expression, dataset_siblings, dataflow_cache,
                 )
+            result.column_usage = _column_usage_for_table(table, dax_refs)
             results.append(asdict(result))
         if tables:
             log(f"  {workspace_name} / {dataset_name}: {len(tables)} table(s) resolved")
@@ -280,9 +323,14 @@ def render_model_lineage_text(results):
     counts: dict[str, int] = {}
     for r in results:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
+    all_cols = [cu for r in results for cu in (r.get("column_usage") or [])]
+    used_cols = sum(1 for cu in all_cols if cu["used_in_dax"])
     lines = [f"MODEL LINEAGE - {len(results)} table(s) scanned", ""]
     for status, n in sorted(counts.items(), key=lambda kv: -kv[1]):
         lines.append(f"  {status}: {n}")
+    if all_cols:
+        lines.append(f"  Columns: {len(all_cols)} total, {used_cols} referenced by a DAX "
+                     f"calculation (measure or calculated column) somewhere in their dataset")
     lines.append("")
     flagged = [r for r in results if r["status"] in _BAD_STATUSES]
     for r in flagged[:20]:
@@ -290,7 +338,8 @@ def render_model_lineage_text(results):
     if len(flagged) > 20:
         lines.append(f"  ... and {len(flagged) - 20} more - see the Excel report.")
     lines.append("")
-    lines.append("Full detail, including every resolved source table and field, is in the Excel report.")
+    lines.append("Full detail, including every resolved source table, field, and column usage, "
+                 "is in the Excel report.")
     return "\n".join(lines)
 
 
@@ -324,16 +373,32 @@ def write_model_lineage_report(results, out_dir, log):
         status_counts[r["status"]] = status_counts.get(r["status"], 0) + 1
     detail_rows = [_summarize_row(r) for r in results]
 
+    column_headers = ["Workspace", "Dataset", "Table", "Column", "Used in a DAX calculation"]
+    column_rows = [
+        [r["workspace_name"], r["dataset_name"], r["table_name"], cu["column"],
+         "Yes" if cu["used_in_dax"] else "No"]
+        for r in results for cu in (r.get("column_usage") or [])
+    ]
+    total_cols = len(column_rows)
+    used_cols = sum(1 for r in column_rows if r[-1] == "Yes")
+
     warn = ("READ FIRST - this is a best-effort text-level scan of each table's Power Query M "
             "code, not an M interpreter (see mashup_parser.PARSER_LIMITATIONS). Fields are only "
             "listed when the M code uses a native SQL Query= passthrough or an explicit "
             "Table.SelectColumns call; a blank Fields column means every source column passes "
             "through unnarrowed by this scan, not that the table has no fields. "
             "'no_expression_available' usually means the tenant setting 'Enhance admin APIs "
-            "responses with DAX and mashup expressions' is not enabled.")
+            "responses with DAX and mashup expressions' is not enabled. 'Used in a DAX "
+            "calculation' (Column usage sheet) means the column is referenced by a measure or "
+            "calculated column's DAX expression somewhere in its dataset - Power BI's Admin APIs "
+            "expose no report/visual content (unlike Qlik's Engine API), so a raw column placed "
+            "directly on a visual with no calculation involved cannot be detected; a 'No' is a "
+            "candidate to verify by hand, not a verdict that the column is unused.")
 
     summary_headers = ["Status", "Table count"]
     summary_rows = sorted(status_counts.items(), key=lambda kv: -kv[1])
+    summary_rows.append(("Columns referenced by a DAX calculation",
+                         f"{used_cols} / {total_cols}" if total_cols else "0 / 0"))
     detail_headers = ["Workspace", "Dataset", "Table", "Status", "Dataflow hops",
                       "Connector", "Source table/view", "Fields (where resolved)",
                       "Fields detected via", "Note"]
@@ -348,7 +413,12 @@ def write_model_lineage_report(results, out_dir, log):
             w = csv.writer(f)
             w.writerow(detail_headers)
             w.writerows(detail_rows)
-        log("openpyxl not installed - wrote a CSV file instead of a workbook.")
+        column_path = os.path.join(out_dir, f"{base}_column_usage.csv")
+        with open(column_path, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            w.writerow(column_headers)
+            w.writerows(column_rows)
+        log("openpyxl not installed - wrote CSV files instead of one workbook.")
         return detail_path
 
     wb = Workbook()
@@ -395,6 +465,23 @@ def write_model_lineage_report(results, out_dir, log):
     if detail_rows:
         ds.freeze_panes = "A2"
         ds.auto_filter.ref = f"A1:{get_column_letter(len(detail_headers))}{ds.max_row}"
+
+    bad_fill = PatternFill("solid", fgColor="F7D9DE")
+    cu = wb.create_sheet("Column usage")
+    cu.append(column_headers)
+    style_header_row(cu, 1, len(column_headers))
+    used_col_idx = column_headers.index("Used in a DAX calculation")
+    for r in column_rows:
+        rn = cu.max_row + 1
+        cu.append(r)
+        if r[used_col_idx] == "No":
+            for c in range(1, len(column_headers) + 1):
+                cu.cell(row=rn, column=c).fill = bad_fill
+    for i, w in enumerate((22, 22, 22, 26, 22), 1):
+        cu.column_dimensions[get_column_letter(i)].width = w
+    if column_rows:
+        cu.freeze_panes = "A2"
+        cu.auto_filter.ref = f"A1:{get_column_letter(len(column_headers))}{cu.max_row}"
 
     out_path = os.path.join(out_dir, f"{base}.xlsx")
     wb.save(out_path)
