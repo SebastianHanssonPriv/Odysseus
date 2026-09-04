@@ -49,8 +49,13 @@ def list_apps(tenant, api_key):
     return apps
 
 
-def list_spaces(tenant, api_key):
-    """List spaces on the tenant. Returns a dict of space_id -> space_name."""
+def list_spaces_full(tenant, api_key):
+    """List spaces with name + type. type is whatever Qlik Cloud's Spaces API
+    reports (typically 'shared' or 'managed' - not verified against a live
+    tenant by this codebase's author, so treat an unexpected/missing value as
+    unknown rather than assuming a specific governance meaning). Personal
+    apps have no spaceId and never appear here - callers label those
+    'Personal' themselves, matching the existing convention elsewhere."""
     host = normalize_host(tenant)
     url = f"https://{host}/api/v1/spaces?limit=100"
     spaces = {}
@@ -61,10 +66,15 @@ def list_spaces(tenant, api_key):
         for it in data.get("data", []):
             sid = it.get("id")
             if sid:
-                spaces[sid] = it.get("name", sid)
+                spaces[sid] = {"name": it.get("name", sid), "type": it.get("type", "") or ""}
         nxt = (data.get("links", {}) or {}).get("next") or {}
         url = nxt.get("href")
     return spaces
+
+
+def list_spaces(tenant, api_key):
+    """List spaces on the tenant. Returns a dict of space_id -> space_name."""
+    return {sid: info["name"] for sid, info in list_spaces_full(tenant, api_key).items()}
 
 
 def list_published_apps(tenant, api_key):
@@ -2179,6 +2189,74 @@ def attach_report_usage(qvd_rows, usage_result):
     return qvd_rows
 
 
+def scan_tenant_lineage(root_apps, open_app_full, fetch_lineage, log=None, max_hops=6,
+                        cancel_check=None):
+    """Full multi-hop QVD + field inventory starting from root_apps
+    ([{guid, name, space_id}], the published apps a tenant scan cares about).
+    Unlike resolve_qvd_chain/trace_upstream_apps (which follow ONE field back
+    to its origin), this fully scans every app reachable by walking
+    'which app produces the QVDs I read' backwards via Qlik's own native
+    lineage graph -- every QVD and every field each app touches, confirmed in
+    that app's own model or not, since an intermediate/staging app's dropped
+    or renamed field is exactly the kind of supporting field that matters
+    here even though it never reaches the end report.
+
+    open_app_full(guid) -> {"title","script","model_fields","usage_result",
+                            "space_id"} or None (usage_result is optional;
+                            pass None to skip the report-usage join for that
+                            app, e.g. to save an API round trip on apps that
+                            are clearly ETL/staging, not report-facing)
+    fetch_lineage(guid)  -> native lineage graph for that app (raises on
+                            failure -- the walk just stops going further back
+                            through that app's own sources)
+
+    Returns {guid: {"title","space_id","is_root","depth","rows"}} -- 'rows'
+    is an analyze_qvd_field_usage() result, enriched with 'used_in_report'
+    when usage_result was given."""
+    apps = {}
+    seen = set()
+    frontier = [(0, a["guid"], a.get("name", ""), a.get("space_id", ""), True) for a in root_apps]
+    while frontier:
+        if cancel_check and cancel_check():
+            if log:
+                log("  lineage walk cancelled.")
+            break
+        depth, guid, fallback_name, fallback_space, is_root = frontier.pop(0)
+        if guid in seen or depth > max_hops:
+            continue
+        seen.add(guid)
+
+        info = open_app_full(guid)
+        if not info:
+            if log:
+                log(f"  (could not open {fallback_name or guid} - skipped)")
+            continue
+
+        tables = parse_load_tables(info.get("script", ""))
+        rows = analyze_qvd_field_usage(tables, info.get("model_fields", []))
+        if info.get("usage_result"):
+            attach_report_usage(rows, info["usage_result"])
+        title = info.get("title") or fallback_name or guid
+        apps[guid] = {"title": title, "space_id": info.get("space_id") or fallback_space or "",
+                     "is_root": is_root, "depth": depth, "rows": rows}
+        qvds = {r["qvd_file"] for r in rows}
+        if log:
+            log(f"  [hop {depth}] {title}: {len(qvds)} QVD(s), {len(rows)} field reference(s)")
+
+        if depth >= max_hops or not qvds:
+            continue
+        try:
+            graph = fetch_lineage(guid)
+        except Exception as e:
+            if log:
+                log(f"  (native lineage unavailable for {title}: {e})")
+            continue
+        for prod in native_producer_apps(graph, qvds):
+            if prod["guid"] not in seen:
+                frontier.append((depth + 1, prod["guid"], prod.get("label", ""), "", False))
+    return apps
+
+
 def cross_reference_qvd_inventory(qvd_inventory, app_rows):
     """qvd_inventory: {basename: modified_date}, e.g. from list_data_files()
     filtered to .qvd. app_rows: the per-app QVD-usage scan results. Returns
@@ -2207,16 +2285,22 @@ def render_tenant_qvd_usage_text(app_rows, qvd_ref_rows):
     confirmed = sum(1 for ar in app_rows for r in ar["rows"] if r["status"] in QVD_CONFIRMED_STATUSES)
     used_in_report = sum(1 for ar in app_rows for r in ar["rows"] if r.get("used_in_report"))
     unreferenced = [r for r in qvd_ref_rows if not r["referenced"]]
+    has_lineage = any("is_root" in ar for ar in app_rows)
+    n_root = sum(1 for ar in app_rows if ar.get("is_root", True))
+    apps_line = (f"TENANT QVD & FIELD USAGE - {n_root} published app(s), "
+                f"{len(app_rows) - n_root} upstream/supporting app(s) discovered via lineage"
+                if has_lineage else
+                f"TENANT QVD & FIELD USAGE - {len(app_rows)} published app(s) scanned")
     lines = [
-        f"TENANT QVD & FIELD USAGE - {len(app_rows)} published app(s) scanned",
-        f"  QVDs: {len(qvd_ref_rows)} total, {len(qvd_ref_rows) - len(unreferenced)} referenced by "
-        f"at least one published app, {len(unreferenced)} not referenced by any",
+        apps_line,
+        f"  QVDs: {len(qvd_ref_rows)} total, {len(qvd_ref_rows) - len(unreferenced)} referenced "
+        f"anywhere in the lineage, {len(unreferenced)} not referenced by any",
         f"  Fields: {total_fields} scanned, {confirmed} confirmed in a model, {used_in_report} of "
         "those actually used in a report (measure/dimension/visual)",
         "",
     ]
     if unreferenced:
-        lines.append("QVDs not referenced by any published app (candidates for cleanup):")
+        lines.append("QVDs not referenced anywhere in the lineage (candidates for cleanup):")
         for r in unreferenced[:20]:
             lines.append(f"    - {r['qvd']}")
         if len(unreferenced) > 20:
@@ -2232,37 +2316,69 @@ def _style_header_row(ws, row, ncols, font, fill):
         ws.cell(row=row, column=c).fill = fill
 
 
-def write_tenant_qvd_usage_report(app_rows, qvd_ref_rows, out_dir, log):
-    """Combined tenant-wide workbook: Summary, QVD inventory (every QVD, and
-    whether any published app reads it), and Field usage (every QVD field
-    confirmed in a model, and whether it is also actually used in a report)."""
+def write_tenant_qvd_usage_report(app_rows, qvd_ref_rows, out_dir, log, space_lookup=None):
+    """Combined tenant-wide workbook: Summary, Apps (every app touched by the
+    lineage walk, its space and space type, root vs upstream/supporting),
+    QVD inventory (every QVD, and whether anything in the lineage reads it),
+    and Field usage (every QVD field found anywhere in the lineage, and
+    whether it is also actually used in a report).
+
+    app_rows: [{'title','guid','rows', 'is_root','depth','space_id' (the
+    last three optional -- omit for a plain per-app scan with no lineage
+    walk)]. space_lookup: {space_id: {'name','type'}} from list_spaces_full,
+    optional -- omit to leave Space/Space type blank."""
     os.makedirs(out_dir, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     base = f"tenant_qvd_usage_{stamp}"
+    space_lookup = space_lookup or {}
+    has_lineage = any("is_root" in ar for ar in app_rows)
+
+    def space_info(ar):
+        sid = ar.get("space_id") or ""
+        if not sid:
+            return "Personal", ""
+        info = space_lookup.get(sid)
+        return (info["name"], info["type"]) if info else (sid, "")
 
     field_headers = ["App", "QVD file", "Target table", "Source field (in QVD)",
                      "Final field (in model)", "Type", "Confirmed status", "Used in a report"]
+    if has_lineage:
+        field_headers += ["App role", "Hop depth"]
     field_rows = []
     for ar in app_rows:
         for r in ar["rows"]:
             used = r.get("used_in_report")
-            field_rows.append([ar["title"], r["qvd_file"], r["target_table"], r["source_field"],
-                               r["final_field"], "Passthrough" if r["passthrough"] else "Expression",
-                               r["status"], "Yes" if used else ("No" if used is False else "")])
+            row = [ar["title"], r["qvd_file"], r["target_table"], r["source_field"],
+                  r["final_field"], "Passthrough" if r["passthrough"] else "Expression",
+                  r["status"], "Yes" if used else ("No" if used is False else "")]
+            if has_lineage:
+                row += ["Root (published)" if ar.get("is_root") else "Upstream (supporting)",
+                       ar.get("depth", "")]
+            field_rows.append(row)
 
-    inv_headers = ["QVD file", "Last modified", "Referenced by any published app", "Referencing app(s)"]
+    inv_headers = ["QVD file", "Last modified", "Referenced anywhere in the lineage", "Referencing app(s)"]
     inv_rows = [[r["qvd"], r["modified"], "Yes" if r["referenced"] else "No", "; ".join(r["apps"])]
                for r in qvd_ref_rows]
+
+    app_headers = ["App", "Space", "Space type", "Role", "Hop depth"]
+    app_summary_rows = []
+    for ar in app_rows:
+        space, space_type = space_info(ar)
+        app_summary_rows.append([ar["title"], space, space_type,
+                                 "Root (published)" if ar.get("is_root") else "Upstream (supporting)",
+                                 ar.get("depth", "")])
 
     total_fields = sum(len(ar["rows"]) for ar in app_rows)
     confirmed = sum(1 for ar in app_rows for r in ar["rows"] if r["status"] in QVD_CONFIRMED_STATUSES)
     used_in_report = sum(1 for ar in app_rows for r in ar["rows"] if r.get("used_in_report"))
     unreferenced = sum(1 for r in qvd_ref_rows if not r["referenced"])
+    n_root = sum(1 for ar in app_rows if ar.get("is_root", True))
     summary_rows = [
-        ["Published apps scanned", len(app_rows)],
+        ["Published (root) apps scanned", n_root],
+        ["Upstream/supporting apps discovered", len(app_rows) - n_root],
         ["QVDs in tenant inventory", len(qvd_ref_rows)],
-        ["QVDs referenced by at least one published app", len(qvd_ref_rows) - unreferenced],
-        ["QVDs not referenced by any published app", unreferenced],
+        ["QVDs referenced anywhere in the lineage", len(qvd_ref_rows) - unreferenced],
+        ["QVDs not referenced anywhere in the lineage", unreferenced],
         ["Fields scanned (QVD LOAD references)", total_fields],
         ["Fields confirmed present in a model", confirmed],
         ["  of which actually used in a report", used_in_report],
@@ -2273,8 +2389,13 @@ def write_tenant_qvd_usage_report(app_rows, qvd_ref_rows, out_dir, log):
             "analysis tab): 'Used in a report' is detected by text-matching every measure, "
             "dimension and visual object's expression against the field name, so a field only "
             "referenced through a dynamic $(...) expression may be wrongly marked unused - verify "
-            "before treating anything as safe to remove. Only PUBLISHED apps were scanned; a "
-            "personal/unpublished app reading a QVD does not count as that QVD being used.")
+            "before treating anything as safe to remove. Scan roots are PUBLISHED apps only; "
+            + ("upstream/supporting apps are followed via Qlik's own lineage graph regardless of "
+               "their own publish state, since they still feed a published report's data - check "
+               "the Apps sheet's Space/Space type for each one's access level. " if has_lineage else
+               "a personal/unpublished app reading a QVD does not count as that QVD being used. ")
+            + "Space type is read from Qlik Cloud's Spaces API as-is and not independently verified "
+              "by this tool - confirm access level in the Qlik admin console before relying on it.")
 
     try:
         from openpyxl import Workbook
@@ -2282,9 +2403,11 @@ def write_tenant_qvd_usage_report(app_rows, qvd_ref_rows, out_dir, log):
         from openpyxl.utils import get_column_letter
     except Exception:
         paths = []
-        for suffix, headers, rows in [("summary", ["Metric", "Value"], summary_rows),
-                                      ("qvd_inventory", inv_headers, inv_rows),
-                                      ("field_usage", field_headers, field_rows)]:
+        sheets = [("summary", ["Metric", "Value"], summary_rows),
+                 ("apps", app_headers, app_summary_rows),
+                 ("qvd_inventory", inv_headers, inv_rows),
+                 ("field_usage", field_headers, field_rows)]
+        for suffix, headers, rows in sheets:
             pth = os.path.join(out_dir, f"{base}_{suffix}.csv")
             with open(pth, "w", newline="", encoding="utf-8-sig") as f:
                 w = csv.writer(f)
@@ -2300,6 +2423,7 @@ def write_tenant_qvd_usage_report(app_rows, qvd_ref_rows, out_dir, log):
     warn_font = Font(bold=True, color="B00020")
     wrap = Alignment(wrap_text=True, vertical="top")
     bad_fill = PatternFill("solid", fgColor="F7D9DE")
+    upstream_fill = PatternFill("solid", fgColor="F7ECD2")
 
     ws = wb.active
     ws.title = "Summary"
@@ -2316,10 +2440,26 @@ def write_tenant_qvd_usage_report(app_rows, qvd_ref_rows, out_dir, log):
     ws.column_dimensions["A"].width = 55
     ws.column_dimensions["B"].width = 20
 
+    aps = wb.create_sheet("Apps")
+    aps.append(app_headers)
+    _style_header_row(aps, 1, len(app_headers), head_font, head_fill)
+    role_col = app_headers.index("Role")
+    for r in app_summary_rows:
+        rn = aps.max_row + 1
+        aps.append(r)
+        if r[role_col].startswith("Upstream"):
+            for c in range(1, len(app_headers) + 1):
+                aps.cell(row=rn, column=c).fill = upstream_fill
+    for i, w in enumerate((32, 26, 16, 22, 12), 1):
+        aps.column_dimensions[get_column_letter(i)].width = w
+    if app_summary_rows:
+        aps.freeze_panes = "A2"
+        aps.auto_filter.ref = f"A1:{get_column_letter(len(app_headers))}{aps.max_row}"
+
     inv = wb.create_sheet("QVD inventory")
     inv.append(inv_headers)
     _style_header_row(inv, 1, len(inv_headers), head_font, head_fill)
-    ref_col = inv_headers.index("Referenced by any published app")
+    ref_col = inv_headers.index("Referenced anywhere in the lineage")
     for r in inv_rows:
         rn = inv.max_row + 1
         inv.append(r)
@@ -2342,7 +2482,8 @@ def write_tenant_qvd_usage_report(app_rows, qvd_ref_rows, out_dir, log):
         if r[used_col] == "No":
             for c in range(1, len(field_headers) + 1):
                 fs.cell(row=rn, column=c).fill = bad_fill
-    for i, w in enumerate((26, 26, 20, 22, 22, 14, 24, 16), 1):
+    widths = [26, 26, 20, 22, 22, 14, 24, 16] + ([18, 10] if has_lineage else [])
+    for i, w in enumerate(widths, 1):
         fs.column_dimensions[get_column_letter(i)].width = w
     if field_rows:
         fs.freeze_panes = "A2"
@@ -2705,6 +2846,16 @@ def pipe_origin_node(pipe):
     if st["kind"] == "autogenerate":
         return {"kind": "Generated", "label": "AUTOGENERATE"}
     return {"kind": "Table", "label": st["table"]}
+
+
+def get_app_space_id(tenant, api_key, guid):
+    """Raw spaceId for an app (empty string for a personal app, or if the
+    lookup fails) - the id itself, not the resolved name, for joining against
+    list_spaces_full()'s richer name+type detail."""
+    try:
+        return _rest_get(tenant, api_key, f"/api/v1/apps/{guid}").get("attributes", {}).get("spaceId", "") or ""
+    except Exception:
+        return ""
 
 
 def app_meta(tenant, api_key, guid, space_cache=None, user_cache=None):

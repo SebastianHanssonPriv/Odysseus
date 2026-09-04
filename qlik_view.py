@@ -1379,44 +1379,54 @@ class QlikView(QWidget):
                          args=(self.tenant, self.api_key, self.output_dir), daemon=True).start()
 
     def _tenant_usage_worker(self, tenant, key, out_dir):
+        def open_app_full(guid, _t=tenant, _k=key, _o=out_dir):
+            exp = core.QlikExporter(_t, _k, guid, _o, self.shell.sig_log.emit)
+            try:
+                exp.connect()
+                app_h = exp.call(-1, "OpenDoc", [guid])["qReturn"]["qHandle"]
+                title = exp.call(app_h, "GetAppLayout", [])["qLayout"].get("qTitle", guid)
+                model_fields = exp.fetch_model_fields(app_h)
+                measures = exp.fetch_measures(app_h)
+                dims = exp.fetch_dimensions(app_h)
+                variables = exp.fetch_variables(app_h)
+                objects = exp.fetch_objects(app_h)
+                return {
+                    "title": title, "script": exp.fetch_script(app_h), "model_fields": model_fields,
+                    "usage_result": core.analyze_usage(measures, dims, variables, objects, model_fields),
+                    "space_id": core.get_app_space_id(_t, _k, guid),
+                }
+            except Exception as e:
+                self.shell.sig_log.emit(f"  (could not open {guid}: {scrub(_k, e)})")
+                return None
+            finally:
+                exp.close()
+
+        def fetch_lineage(guid, _t=tenant, _k=key):
+            return core.fetch_native_lineage(_t, _k, guid)
+
         try:
             self.log("Listing published apps ...")
-            apps = core.list_published_apps(tenant, key)
-            self.log(f"  {len(apps)} published app(s) found.")
+            root_apps = core.list_published_apps(tenant, key)
+            self.log(f"  {len(root_apps)} published app(s) found - tracing full lineage "
+                     "(this can take a while) ...")
             try:
                 qvd_inventory = {b: m for b, m in core.list_data_files(tenant, key).items()
                                  if b.endswith(".qvd")}
             except Exception as e:
                 qvd_inventory = {}
                 self.log(f"  (data file inventory unavailable: {scrub(key, e)})")
+            try:
+                space_lookup = core.list_spaces_full(tenant, key)
+            except Exception as e:
+                space_lookup = {}
+                self.log(f"  (space list unavailable: {scrub(key, e)})")
 
-            app_rows = []
-            for a in apps:
-                if self.shell.cancel_requested():
-                    self.log("Tenant usage scan cancelled.")
-                    break
-                exp = core.QlikExporter(tenant, key, a["guid"], out_dir, self.shell.sig_log.emit)
-                try:
-                    exp.connect()
-                    app_h = exp.call(-1, "OpenDoc", [a["guid"]])["qReturn"]["qHandle"]
-                    title = exp.call(app_h, "GetAppLayout", [])["qLayout"].get("qTitle", a["guid"])
-                    script = exp.fetch_script(app_h)
-                    model_fields = exp.fetch_model_fields(app_h)
-                    measures = exp.fetch_measures(app_h)
-                    dims = exp.fetch_dimensions(app_h)
-                    variables = exp.fetch_variables(app_h)
-                    objects = exp.fetch_objects(app_h)
-                    tables = core.parse_load_tables(script)
-                    rows = core.analyze_qvd_field_usage(tables, model_fields)
-                    usage_result = core.analyze_usage(measures, dims, variables, objects, model_fields)
-                    core.attach_report_usage(rows, usage_result)
-                    app_rows.append({"title": title, "guid": a["guid"], "rows": rows})
-                    qvds = {r["qvd_file"] for r in rows}
-                    self.log(f"  {title}: {len(qvds)} QVD source(s), {len(rows)} field reference(s)")
-                except Exception as e:
-                    self.log(f"ERROR scanning {a.get('name', a['guid'])}: {scrub(key, e)}")
-                finally:
-                    exp.close()
+            scan_result = core.scan_tenant_lineage(root_apps, open_app_full, fetch_lineage,
+                                                    log=self.shell.sig_log.emit,
+                                                    cancel_check=self.shell.cancel_requested)
+            app_rows = [{"title": v["title"], "guid": g, "rows": v["rows"], "is_root": v["is_root"],
+                        "depth": v["depth"], "space_id": v["space_id"]}
+                       for g, v in scan_result.items()]
 
             if self.shell.cancel_requested():
                 self.log("Tenant usage scan cancelled - no report written.")
@@ -1428,7 +1438,8 @@ class QlikView(QWidget):
             text = core.render_tenant_qvd_usage_text(app_rows, qvd_ref_rows)
             self.sig_tenant_usage_done.emit(text)
             out_path = core.write_tenant_qvd_usage_report(app_rows, qvd_ref_rows, out_dir,
-                                                           self.shell.sig_log.emit)
+                                                           self.shell.sig_log.emit,
+                                                           space_lookup=space_lookup)
             self.log(f"Tenant QVD & field usage report -> {os.path.basename(out_path)}")
         except Exception as e:
             self.log(f"ERROR: {scrub(key, e)}")

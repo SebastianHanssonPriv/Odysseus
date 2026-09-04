@@ -82,19 +82,35 @@ The **Field lineage** tab has two independent tools:
   upstream across apps via Qlik's own lineage graph.
 
 The **Tenant usage** tab answers the same two questions as the QVD field usage
-report, but tenant-wide and for exactly what matters for governance: no app
-selection needed — it scans every **published** app (unpublished/personal
-apps are skipped, since nobody consumes reports from them) to find (1) which
-QVDs in the tenant's data-file inventory are read by any published app at all
-(an unreferenced one is a cleanup candidate), and (2) of the fields those apps
-load from QVDs, which are actually **used in a report** — placed on a measure,
-dimension or visual somewhere — rather than merely present in the data model.
-Writes one `tenant_qvd_usage_*.xlsx` (Summary, QVD inventory, Field usage) and
-shows a summary in the panel below. Opens every published app in the tenant,
-so it is slower than the per-app QVD field usage report — expect it to take a
-while on a large tenant. Same caveat as Usage analysis: "used" is detected by
-text-matching expressions, so a field referenced only through a dynamic
-`$(...)` expression can be wrongly marked unused — verify before deleting.
+report, but tenant-wide, for the *entire* lineage, and for exactly what
+matters for governance: no app selection needed — it starts from every
+**published** app (unpublished/personal apps are not scan roots, since nobody
+consumes reports from them directly) and walks backward through Qlik's own
+lineage graph, one producing app at a time, to find every **upstream/
+supporting app** that feeds a published app's data — an ETL or staging app
+that is itself unpublished still gets fully scanned if a published app's data
+passes through it. For every app in that chain (root and upstream alike) it
+finds (1) which QVDs it reads (an entry in the tenant's data-file inventory
+that nothing in the whole chain reads is a cleanup candidate), and (2) every
+field it loads from those QVDs — including ones dropped or renamed before
+reaching that app's own final model (a "supporting" field) — with, for a
+published app, whether the field is actually **used in a report**: placed on
+a measure, dimension or visual, not merely present in the data model.
+
+Writes one `tenant_qvd_usage_*.xlsx` — **Summary**, **Apps** (every app
+touched, its **Space** and **Space type**, and whether it's a Root/published
+app or an Upstream/supporting one — the security-relevant view: a published
+report's data can pass through an app sitting in a much less restricted space
+than the report itself), **QVD inventory**, and **Field usage** — and shows a
+summary in the panel below. This walks and fully re-scans every app in the
+lineage, not just the published ones, so it is meaningfully slower than the
+per-app QVD field usage report — expect it to take a while on a large tenant,
+and note that a very deep or branching pipeline is capped at 6 hops back from
+each published app. Same caveat as Usage analysis: "used in a report" is
+detected by text-matching expressions, so a field referenced only through a
+dynamic `$(...)` expression can be wrongly marked unused — verify before
+deleting. Space type is read from Qlik Cloud's Spaces API as-is; confirm
+actual access level in the Qlik admin console before relying on it.
 
 ## 4. Power BI workspace
 - **Collect** — pick a UTC **date range** (From / To, defaults to the last 7 days
