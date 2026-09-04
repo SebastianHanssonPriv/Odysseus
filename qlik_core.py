@@ -1796,6 +1796,29 @@ def _field_in_out_name(piece):
 _SRC_KW = re.compile(r"(?i)\b(FROM|RESIDENT|INLINE|AUTOGENERATE)\b")
 
 
+def _sql_select_fields(sql_text):
+    """Best-effort column list of a bare 'SQL SELECT col1, col2 FROM ...'
+    statement (no separate LOAD declaring the fields) -- same AS-aliasing
+    convention as a Qlik LOAD field list, so _field_in_out_name applies
+    unchanged. Returns (out_fields, wildcard); ([], False) if unparseable
+    (e.g. SELECT *, or the column list could not be isolated)."""
+    m = re.search(r"(?is)^\s*(?:SQL\s+)?SELECT\s+(.*?)\s+FROM\b", sql_text or "")
+    if not m:
+        return [], False
+    sel = m.group(1)
+    if _split_top_level(sel)[0].strip() == "*":
+        return [], True
+    out_fields = []
+    for piece in _split_top_level(sel):
+        p = piece.strip()
+        if not p or p == "*":
+            continue
+        out, inn = _field_in_out_name(p)
+        if out:
+            out_fields.append({"out": out, "in": inn})
+    return out_fields, False
+
+
 def _sql_source_label(sql_text, conn):
     """Describe a SQL source as '<connection> · <table>' (best-effort)."""
     mfrom = re.search(r"(?is)\bFROM\b\s+([A-Za-z0-9_.\[\]\"`]+)", sql_text or "")
@@ -1893,6 +1916,7 @@ def parse_load_tables(script):
         elif is_sql:
             kind, external = "sql", True
             source = _sql_source_label(body, cur_conn)
+            out_fields, wildcard = _sql_select_fields(body)
 
         tables.append({
             "label": label or (f"(table #{len(tables) + 1})"),
@@ -2189,17 +2213,76 @@ def attach_report_usage(qvd_rows, usage_result):
     return qvd_rows
 
 
+def _resolve_row_origin(qvd, field, tables_by_guid, qvd_producer, title_by_guid, max_hops=6,
+                        memo=None):
+    """Follow one QVD field back through however many producer-app hops it
+    takes to its TRUE origin -- a database table (with its connection/
+    database name), a file, or wherever the chain of Qlik apps producing
+    that QVD ultimately stops. Reuses the scripts scan_tenant_lineage already
+    fetched for every app in the walk (tables_by_guid) and the producer map
+    it already discovered via Qlik's native lineage graph (qvd_producer), so
+    this costs no extra API calls -- it is the same logic resolve_qvd_chain/
+    trace_upstream_apps use for one field interactively, applied to every row
+    of a tenant-wide scan for free.
+
+    Returns {"origin_kind","origin_label","chain"}. origin_kind is "QVD"
+    when the chain could not be followed any further (no producing app was
+    ever scanned for that QVD, that app's own source could not be resolved
+    from its script, or the hop cap was hit) -- origin_label is then just
+    the last QVD reached, and `chain` explains why it stopped there."""
+    memo = memo if memo is not None else {}
+    key = (qvd.lower(), (field or "").lower())
+    if key in memo:
+        return memo[key]
+
+    chain_apps = []
+    cur_qvd, cur_field = qvd, field
+    result = None
+    for _ in range(max_hops):
+        producer_guid = qvd_producer.get(cur_qvd.lower())
+        tables = tables_by_guid.get(producer_guid) if producer_guid else None
+        if not producer_guid or tables is None:
+            result = {"origin_kind": "QVD", "origin_label": cur_qvd,
+                     "stop": "no producing app found/scanned for this QVD - genuinely "
+                             "terminal, or outside this tenant's tracked lineage"}
+            break
+        title = title_by_guid.get(producer_guid, producer_guid)
+        pipe = trace_field_pipeline(cur_field, tables)
+        chain_apps.append(title)
+        onode = pipe_origin_node(pipe) if pipe.get("found") else None
+        if not onode:
+            result = {"origin_kind": "QVD", "origin_label": cur_qvd,
+                     "stop": f"chain stops at app '{title}' - its own source could not be "
+                             "resolved from its load script"}
+            break
+        if onode["kind"] != "QVD":
+            result = {"origin_kind": onode["kind"], "origin_label": onode["label"], "stop": None}
+            break
+        cur_qvd, cur_field = onode["label"], (pipe.get("source_field") or cur_field)
+    else:
+        result = {"origin_kind": "QVD", "origin_label": cur_qvd,
+                 "stop": f"chain truncated at the {max_hops}-hop cap"}
+
+    chain = " -> ".join([f"{result['origin_kind']}: {result['origin_label']}"] +
+                        [f"[{t}]" for t in reversed(chain_apps)])
+    result["chain"] = chain + (f"  ({result['stop']})" if result["stop"] else "")
+    memo[key] = result
+    return result
+
+
 def scan_tenant_lineage(root_apps, open_app_full, fetch_lineage, log=None, max_hops=6,
                         cancel_check=None):
     """Full multi-hop QVD + field inventory starting from root_apps
     ([{guid, name, space_id}], the published apps a tenant scan cares about).
-    Unlike resolve_qvd_chain/trace_upstream_apps (which follow ONE field back
-    to its origin), this fully scans every app reachable by walking
-    'which app produces the QVDs I read' backwards via Qlik's own native
-    lineage graph -- every QVD and every field each app touches, confirmed in
-    that app's own model or not, since an intermediate/staging app's dropped
-    or renamed field is exactly the kind of supporting field that matters
-    here even though it never reaches the end report.
+    Walks 'which app produces the QVDs I read' backwards via Qlik's own
+    native lineage graph -- every QVD and every field each app touches,
+    confirmed in that app's own model or not, since an intermediate/staging
+    app's dropped or renamed field is exactly the kind of supporting field
+    that matters here even though it never reaches the end report. Once every
+    reachable app has been scanned, it also resolves each field's TRUE
+    origin -- a database table (with its connection/database name), a file,
+    or wherever the chain stops -- for free, from the scripts already fetched
+    (see _resolve_row_origin).
 
     open_app_full(guid) -> {"title","script","model_fields","usage_result",
                             "space_id"} or None (usage_result is optional;
@@ -2212,9 +2295,13 @@ def scan_tenant_lineage(root_apps, open_app_full, fetch_lineage, log=None, max_h
 
     Returns {guid: {"title","space_id","is_root","depth","rows"}} -- 'rows'
     is an analyze_qvd_field_usage() result, enriched with 'used_in_report'
-    when usage_result was given."""
+    when usage_result was given, and with 'origin_kind'/'origin_label'/
+    'chain' from _resolve_row_origin (None/None/"" for a wildcard row --
+    trace an individual field to resolve those)."""
     apps = {}
     seen = set()
+    tables_by_guid = {}
+    qvd_producer = {}
     frontier = [(0, a["guid"], a.get("name", ""), a.get("space_id", ""), True) for a in root_apps]
     while frontier:
         if cancel_check and cancel_check():
@@ -2233,6 +2320,7 @@ def scan_tenant_lineage(root_apps, open_app_full, fetch_lineage, log=None, max_h
             continue
 
         tables = parse_load_tables(info.get("script", ""))
+        tables_by_guid[guid] = tables
         rows = analyze_qvd_field_usage(tables, info.get("model_fields", []))
         if info.get("usage_result"):
             attach_report_usage(rows, info["usage_result"])
@@ -2252,8 +2340,31 @@ def scan_tenant_lineage(root_apps, open_app_full, fetch_lineage, log=None, max_h
                 log(f"  (native lineage unavailable for {title}: {e})")
             continue
         for prod in native_producer_apps(graph, qvds):
+            qvd_producer.setdefault(prod["qvd"].lower(), prod["guid"])
             if prod["guid"] not in seen:
                 frontier.append((depth + 1, prod["guid"], prod.get("label", ""), "", False))
+
+    title_by_guid = {g: v["title"] for g, v in apps.items()}
+    memo = {}
+    n_db = n_other = n_stopped = 0
+    for info in apps.values():
+        for r in info["rows"]:
+            if r["source_field"] == "*":
+                r["origin_kind"], r["origin_label"], r["chain"] = None, None, ""
+                continue
+            origin = _resolve_row_origin(r["qvd_file"], r["source_field"], tables_by_guid,
+                                         qvd_producer, title_by_guid, max_hops, memo)
+            r["origin_kind"], r["origin_label"], r["chain"] = \
+                origin["origin_kind"], origin["origin_label"], origin["chain"]
+            if origin["origin_kind"] == "Database":
+                n_db += 1
+            elif origin["origin_kind"] != "QVD":
+                n_other += 1
+            else:
+                n_stopped += 1
+    if log and (n_db or n_other or n_stopped):
+        log(f"  True origin resolved for {n_db + n_other} field reference(s) "
+            f"({n_db} to a database table); {n_stopped} could not be traced past the QVD layer.")
     return apps
 
 
@@ -2291,12 +2402,18 @@ def render_tenant_qvd_usage_text(app_rows, qvd_ref_rows):
                 f"{len(app_rows) - n_root} upstream/supporting app(s) discovered via lineage"
                 if has_lineage else
                 f"TENANT QVD & FIELD USAGE - {len(app_rows)} published app(s) scanned")
+    reached_db = sum(1 for ar in app_rows for r in ar["rows"] if r.get("origin_kind") == "Database")
+    resolved_origin = sum(1 for ar in app_rows for r in ar["rows"]
+                          if r.get("origin_kind") not in (None, "QVD"))
     lines = [
         apps_line,
         f"  QVDs: {len(qvd_ref_rows)} total, {len(qvd_ref_rows) - len(unreferenced)} referenced "
         f"anywhere in the lineage, {len(unreferenced)} not referenced by any",
         f"  Fields: {total_fields} scanned, {confirmed} confirmed in a model, {used_in_report} of "
         "those actually used in a report (measure/dimension/visual)",
+        f"  True origin: {resolved_origin} of {total_fields} field reference(s) traced past the QVD "
+        f"layer to a genuine external source ({reached_db} to a database table) - see 'True origin'/"
+        "'Chain' in the Field usage sheet for the rest, and why each one stopped where it did.",
         "",
     ]
     if unreferenced:
@@ -2340,10 +2457,13 @@ def write_tenant_qvd_usage_report(app_rows, qvd_ref_rows, out_dir, log, space_lo
         info = space_lookup.get(sid)
         return (info["name"], info["type"]) if info else (sid, "")
 
+    has_origin = any("chain" in r for ar in app_rows for r in ar["rows"])
     field_headers = ["App", "QVD file", "Target table", "Source field (in QVD)",
                      "Final field (in model)", "Type", "Confirmed status", "Used in a report"]
     if has_lineage:
         field_headers += ["App role", "Hop depth"]
+    if has_origin:
+        field_headers += ["True origin", "Chain (origin -> ... -> this app)"]
     field_rows = []
     for ar in app_rows:
         for r in ar["rows"]:
@@ -2354,6 +2474,10 @@ def write_tenant_qvd_usage_report(app_rows, qvd_ref_rows, out_dir, log, space_lo
             if has_lineage:
                 row += ["Root (published)" if ar.get("is_root") else "Upstream (supporting)",
                        ar.get("depth", "")]
+            if has_origin:
+                origin_label = r.get("origin_label")
+                row += [f"{r['origin_kind']}: {origin_label}" if origin_label else "(wildcard - "
+                       "trace an individual field for its true origin)", r.get("chain") or ""]
             field_rows.append(row)
 
     inv_headers = ["QVD file", "Last modified", "Referenced anywhere in the lineage", "Referencing app(s)"]
@@ -2373,6 +2497,9 @@ def write_tenant_qvd_usage_report(app_rows, qvd_ref_rows, out_dir, log, space_lo
     used_in_report = sum(1 for ar in app_rows for r in ar["rows"] if r.get("used_in_report"))
     unreferenced = sum(1 for r in qvd_ref_rows if not r["referenced"])
     n_root = sum(1 for ar in app_rows if ar.get("is_root", True))
+    reached_db = sum(1 for ar in app_rows for r in ar["rows"] if r.get("origin_kind") == "Database")
+    resolved_origin = sum(1 for ar in app_rows for r in ar["rows"]
+                          if r.get("origin_kind") not in (None, "QVD"))
     summary_rows = [
         ["Published (root) apps scanned", n_root],
         ["Upstream/supporting apps discovered", len(app_rows) - n_root],
@@ -2382,6 +2509,8 @@ def write_tenant_qvd_usage_report(app_rows, qvd_ref_rows, out_dir, log, space_lo
         ["Fields scanned (QVD LOAD references)", total_fields],
         ["Fields confirmed present in a model", confirmed],
         ["  of which actually used in a report", used_in_report],
+        ["Fields traced past the QVD layer to a genuine source (database/file/etc.)", resolved_origin],
+        ["  of which traced to a database table", reached_db],
         ["Generated", datetime.datetime.now().strftime("%Y-%m-%d %H:%M UTC")],
     ]
 
@@ -2395,7 +2524,13 @@ def write_tenant_qvd_usage_report(app_rows, qvd_ref_rows, out_dir, log, space_lo
                "the Apps sheet's Space/Space type for each one's access level. " if has_lineage else
                "a personal/unpublished app reading a QVD does not count as that QVD being used. ")
             + "Space type is read from Qlik Cloud's Spaces API as-is and not independently verified "
-              "by this tool - confirm access level in the Qlik admin console before relying on it.")
+              "by this tool - confirm access level in the Qlik admin console before relying on it. "
+              "'True origin'/'Chain' trace each field as far back as the lineage walk could follow "
+              "it -- to a database table (shown as its connection name and table/SELECT text), a "
+              "file, or wherever the chain stopped (still another QVD): control-flow blocks (IF/FOR/"
+              "SUB), $(variable) FROM paths and table-driven RENAME FIELDS are not evaluated by this "
+              "text-level scan, and the walk is capped at 6 hops back from each published app -- a "
+              "row still showing 'QVD' as its origin is a lead to verify by hand, not a dead end.")
 
     try:
         from openpyxl import Workbook
@@ -2482,7 +2617,8 @@ def write_tenant_qvd_usage_report(app_rows, qvd_ref_rows, out_dir, log, space_lo
         if r[used_col] == "No":
             for c in range(1, len(field_headers) + 1):
                 fs.cell(row=rn, column=c).fill = bad_fill
-    widths = [26, 26, 20, 22, 22, 14, 24, 16] + ([18, 10] if has_lineage else [])
+    widths = [26, 26, 20, 22, 22, 14, 24, 16] + ([18, 10] if has_lineage else []) \
+        + ([30, 60] if has_origin else [])
     for i, w in enumerate(widths, 1):
         fs.column_dimensions[get_column_letter(i)].width = w
     if field_rows:

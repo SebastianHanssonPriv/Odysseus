@@ -467,12 +467,15 @@ class QlikView(QWidget):
         tc = make_card()
         tcl = QVBoxLayout(tc)
         tcl.addWidget(label("TENANT QVD & FIELD USAGE  (published apps only)", "section"))
-        tcl.addWidget(label("Scans every PUBLISHED app in the tenant (unpublished/personal apps are "
-                            "skipped - they aren't distributed to end users). For each QVD: is it read "
-                            "by any published app. For each field a published app loads from a QVD: is "
-                            "it also actually used in a measure, dimension or visual anywhere in that "
-                            "app - not just present in the data model. No app selection needed, but "
-                            "this opens every published app in the tenant, so it can take a while.",
+        tcl.addWidget(label("Scans every PUBLISHED app in the tenant, then walks backward via Qlik's "
+                            "own lineage graph through every upstream/staging app that feeds it, for "
+                            "the full source-to-model picture: which QVDs are read, which fields make "
+                            "it into the model, whether a published app's field is also actually used "
+                            "in a measure, dimension or visual - and for every field, its TRUE origin: "
+                            "traced as far back as the lineage allows, ideally to a database table and "
+                            "the connection/database it came from, or to a file, wherever the chain of "
+                            "producing apps ultimately stops. No app selection needed, but this opens "
+                            "every app in the lineage (root and upstream alike), so it can take a while.",
                             "muted", wrap=True))
         trow = QHBoxLayout()
         self.btn_tenant_usage = QPushButton("Scan tenant QVD & field usage")

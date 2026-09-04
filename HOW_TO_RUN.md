@@ -95,22 +95,33 @@ that nothing in the whole chain reads is a cleanup candidate), and (2) every
 field it loads from those QVDs — including ones dropped or renamed before
 reaching that app's own final model (a "supporting" field) — with, for a
 published app, whether the field is actually **used in a report**: placed on
-a measure, dimension or visual, not merely present in the data model.
+a measure, dimension or visual, not merely present in the data model. And (3)
+once every reachable app has been scanned, every field's **true origin** —
+traced back through however many producer-app hops it takes, to a database
+table (shown with its connection/database name, e.g. `SalesDW  ·
+dbo.FactSales`) or a file wherever the chain of Qlik apps ultimately bottoms
+out — for free, reusing the scripts already fetched for the lineage walk
+itself (no extra API calls, no separate step or checkbox).
 
 Writes one `tenant_qvd_usage_*.xlsx` — **Summary**, **Apps** (every app
 touched, its **Space** and **Space type**, and whether it's a Root/published
 app or an Upstream/supporting one — the security-relevant view: a published
 report's data can pass through an app sitting in a much less restricted space
-than the report itself), **QVD inventory**, and **Field usage** — and shows a
-summary in the panel below. This walks and fully re-scans every app in the
-lineage, not just the published ones, so it is meaningfully slower than the
-per-app QVD field usage report — expect it to take a while on a large tenant,
-and note that a very deep or branching pipeline is capped at 6 hops back from
-each published app. Same caveat as Usage analysis: "used in a report" is
-detected by text-matching expressions, so a field referenced only through a
-dynamic `$(...)` expression can be wrongly marked unused — verify before
-deleting. Space type is read from Qlik Cloud's Spaces API as-is; confirm
-actual access level in the Qlik admin console before relying on it.
+than the report itself), **QVD inventory**, and **Field usage** (now with
+**True origin** and **Chain** columns showing exactly how far back each field
+was traced and why it stopped where it did) — and shows a summary in the
+panel below. This walks and fully re-scans every app in the lineage, not just
+the published ones, so it is meaningfully slower than the per-app QVD field
+usage report — expect it to take a while on a large tenant, and note that a
+very deep or branching pipeline is capped at 6 hops back from each published
+app: a row still showing "QVD" as its true origin means the chain stopped
+there (no producing app found, that app's own source wasn't resolvable from
+its script, or the hop cap was hit) — a lead to verify by hand, not a dead
+end. Same caveat as Usage analysis: "used in a report" is detected by
+text-matching expressions, so a field referenced only through a dynamic
+`$(...)` expression can be wrongly marked unused — verify before deleting.
+Space type is read from Qlik Cloud's Spaces API as-is; confirm actual access
+level in the Qlik admin console before relying on it.
 
 ## 4. Power BI workspace
 - **Collect** — pick a UTC **date range** (From / To, defaults to the last 7 days
