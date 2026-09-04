@@ -56,11 +56,11 @@ class PowerBIView(QWidget):
         self.shell.log(msg)
 
     def _data_dir(self) -> Path | None:
-        if not self.shell.output_dir:
+        if not self.shell.output_dir_powerbi:
             QMessageBox.warning(self, "Missing settings",
-                                "Set an output folder in Settings - Power BI data lands under it.")
+                                "Set a Power BI output folder in Settings - Power BI data lands under it.")
             return None
-        return Path(self.shell.output_dir) / "powerbi_data"
+        return Path(self.shell.output_dir_powerbi) / "powerbi_data"
 
     def _pbi_settings(self, data_dir: Path) -> Settings:
         """Build a config.Settings from the shell's Power BI settings (raises

@@ -89,7 +89,14 @@ class QlikView(QWidget):
 
     @property
     def output_dir(self):
-        return self.shell.output_dir
+        return self.shell.output_dir_qlik
+
+    def _feature_dir(self, name):
+        """This feature's own subfolder under the Qlik output root (created
+        on demand by whichever write_*/QlikExporter call uses it) -- keeps
+        every export/report type physically separated instead of all of
+        them piling into one shared folder."""
+        return os.path.join(self.output_dir or os.path.expanduser("~"), name)
 
     def log(self, msg):
         self.shell.log(msg)
@@ -728,7 +735,8 @@ class QlikView(QWidget):
         flags = tuple(self.checks[k].isChecked()
                       for k in ("measures", "dimensions", "variables", "script", "visuals"))
         threading.Thread(target=self._export_worker,
-                         args=(self.tenant, self.api_key, self.output_dir, targets, flags),
+                         args=(self.tenant, self.api_key, self._feature_dir("metadata_export"),
+                               targets, flags),
                          daemon=True).start()
 
     def _export_worker(self, tenant, key, out_dir, targets, flags):
@@ -763,7 +771,8 @@ class QlikView(QWidget):
         self.shell.busy_begin("Analyzing consistency")
         self.log(f"Analyzing {len(targets)} app(s) for measure/dimension consistency ...")
         threading.Thread(target=self._analyze_worker,
-                         args=(self.tenant, self.api_key, self.output_dir, targets),
+                         args=(self.tenant, self.api_key, self._feature_dir("comparison_analysis"),
+                               targets),
                          daemon=True).start()
 
     def _analyze_worker(self, tenant, key, out_dir, targets):
@@ -835,7 +844,8 @@ class QlikView(QWidget):
         self.shell.busy_begin("Analyzing usage")
         self.log(f"Analyzing usage for {len(targets)} app(s) ...")
         threading.Thread(target=self._usage_worker,
-                         args=(self.tenant, self.api_key, self.output_dir, targets),
+                         args=(self.tenant, self.api_key, self._feature_dir("usage_analysis"),
+                               targets),
                          daemon=True).start()
 
     def _usage_worker(self, tenant, key, out_dir, targets):
@@ -890,7 +900,8 @@ class QlikView(QWidget):
         self.log("Scanning tenant capacity (App reload + Import)"
                  + (" with orphan detection - this can take a while ..." if with_orphans else " ..."))
         threading.Thread(target=self._capacity_worker,
-                         args=(self.tenant, self.api_key, self.output_dir, with_orphans),
+                         args=(self.tenant, self.api_key, self._feature_dir("capacity_report"),
+                               with_orphans),
                          daemon=True).start()
 
     def _capacity_worker(self, tenant, key, out_dir, with_orphans):
@@ -1226,8 +1237,8 @@ class QlikView(QWidget):
         self.shell.busy_begin("Dry run" if dry else "Applying master items")
         self.log(("DRY RUN - " if dry else "") + f"Applying to {len(targets)} app(s) [{op}] ...")
         threading.Thread(target=self._apply_worker,
-                         args=(self.tenant, self.api_key, self.output_dir, targets,
-                               meas_rows, dim_rows, mode, dry), daemon=True).start()
+                         args=(self.tenant, self.api_key, self._feature_dir("apply_master_items"),
+                               targets, meas_rows, dim_rows, mode, dry), daemon=True).start()
 
     def _apply_worker(self, tenant, key, out_dir, targets, meas_rows, dim_rows, mode, dry):
         try:
@@ -1284,7 +1295,7 @@ class QlikView(QWidget):
         self.shell.busy_begin("Scanning QVD field usage")
         self.log(f"Scanning QVD field usage for {len(targets)} app(s) ...")
         threading.Thread(target=self._qvd_usage_worker,
-                         args=(self.tenant, self.api_key, self.output_dir, targets,
+                         args=(self.tenant, self.api_key, self._feature_dir("field_lineage"), targets,
                                self.chk_qvd_upstream.isChecked()), daemon=True).start()
 
     def _attach_upstream_chains(self, rows, tenant, key, this_app_guid, chain_cache):
@@ -1292,7 +1303,7 @@ class QlikView(QWidget):
         across the whole scan, since the same QVD is often shared by several
         apps/fields - and attach it to every row sourced from that QVD."""
         def open_app(guid, _t=tenant, _k=key):
-            ex = core.QlikExporter(_t, _k, guid, self.output_dir or os.path.expanduser("~"),
+            ex = core.QlikExporter(_t, _k, guid, self._feature_dir("field_lineage"),
                                    self.shell.sig_log.emit)
             try:
                 ex.connect()
@@ -1379,7 +1390,8 @@ class QlikView(QWidget):
         self.shell.busy_begin("Scanning tenant QVD & field usage")
         self.log("Scanning tenant QVD & field usage (published apps only) ...")
         threading.Thread(target=self._tenant_usage_worker,
-                         args=(self.tenant, self.api_key, self.output_dir), daemon=True).start()
+                         args=(self.tenant, self.api_key, self._feature_dir("tenant_usage")),
+                         daemon=True).start()
 
     def _tenant_usage_worker(self, tenant, key, out_dir):
         def open_app_full(guid, _t=tenant, _k=key, _o=out_dir):
@@ -1518,8 +1530,8 @@ class QlikView(QWidget):
         self.shell.busy_begin("Tracing lineage")
         self.log(f"Tracing lineage for '{field}' ...")
         threading.Thread(target=self._trace_worker,
-                         args=(self.tenant, self.api_key, self.output_dir, app, field,
-                               self.chk_native.isChecked()), daemon=True).start()
+                         args=(self.tenant, self.api_key, self._feature_dir("field_lineage"), app,
+                               field, self.chk_native.isChecked()), daemon=True).start()
 
     def _trace_worker(self, tenant, key, out_dir, app, field, use_native):
         try:

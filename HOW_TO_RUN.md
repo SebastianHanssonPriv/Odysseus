@@ -41,8 +41,18 @@ Open **Settings** (bottom of the nav rail) and fill in what you need:
 - **Qlik:** Tenant host + API key.
 - **Power BI:** Tenant ID, Client ID, an Auth mode, and either the client secret
   or the Key Vault URL + secret name.
-- **Shared:** an Output folder (everything is written under it; Power BI data
-  lands in `<output>\powerbi_data\`).
+- **Output folders:** a separate one for **Qlik** and for **Power BI** — the two
+  products never write into the same folder. Within each, every feature gets
+  its own subfolder, so nothing lands loose in one shared pile:
+  - Qlik → `<Qlik output>\metadata_export\`, `\comparison_analysis\`,
+    `\usage_analysis\`, `\capacity_report\`, `\apply_master_items\`,
+    `\field_lineage\` (both the QVD field usage report and the interactive
+    trace), `\tenant_usage\`.
+  - Power BI → `<Power BI output>\powerbi_data\` (as before), with its own
+    `activity_events\`, `raw\`, `analytics\`, `model_lineage\` subfolders.
+  Upgrading from an older version that had one shared "Output folder"?
+  Both new folders are pre-filled with that old value the first time you open
+  Settings — change either one (or both) as needed.
 
 Secrets (Qlik API key, Power BI client secret) are **never saved to disk** —
 re-enter them each session. Everything else is remembered in

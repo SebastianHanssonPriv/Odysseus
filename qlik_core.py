@@ -128,6 +128,8 @@ class QlikExporter:
         self.log = log
         self.id = 0
         self.ws = None
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
 
     # --- engine plumbing ---
     def connect(self):

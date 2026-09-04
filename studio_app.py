@@ -2,9 +2,11 @@
 
 One window over two products: Qlik Cloud governance and Power BI usage. A left
 nav rail switches between a Home overview, the Qlik workspace and the Power BI
-workspace; the header, status line, busy indicator, LOG panel, output folder and
-Settings are shared. Secrets (Qlik API key, Power BI client secret) are held in
-memory only and never written to disk.
+workspace; the header, status line, busy indicator, LOG panel and Settings are
+shared, but each product has its OWN output folder (set independently in
+Settings), and within it every feature writes to its own subfolder. Secrets
+(Qlik API key, Power BI client secret) are held in memory only and never
+written to disk.
 
 Entry point: main().
 """
@@ -107,18 +109,31 @@ class SettingsDialog(QDialog):
         pg.setColumnStretch(1, 1)
         lay.addLayout(pg)
 
-        # --- shared ---
-        lay.addWidget(self._sec("SHARED"))
+        # --- output folders (one per product, so exports never mix) ---
+        lay.addWidget(self._sec("OUTPUT FOLDERS"))
         og = QGridLayout()
-        og.addWidget(self._mut("Output folder"), 0, 0)
-        self.ed_out = QLineEdit(parent.output_dir)
-        og.addWidget(self.ed_out, 0, 1)
-        browse = QPushButton("Browse...")
-        browse.setObjectName("ghost")
-        browse.clicked.connect(self._browse)
-        og.addWidget(browse, 0, 2)
+        og.addWidget(self._mut("Qlik output folder"), 0, 0)
+        self.ed_out_qlik = QLineEdit(parent.output_dir_qlik)
+        og.addWidget(self.ed_out_qlik, 0, 1)
+        browse_q = QPushButton("Browse...")
+        browse_q.setObjectName("ghost")
+        browse_q.clicked.connect(lambda: self._browse(self.ed_out_qlik))
+        og.addWidget(browse_q, 0, 2)
+        og.addWidget(self._mut("Power BI output folder"), 1, 0)
+        self.ed_out_pbi = QLineEdit(parent.output_dir_powerbi)
+        og.addWidget(self.ed_out_pbi, 1, 1)
+        browse_p = QPushButton("Browse...")
+        browse_p.setObjectName("ghost")
+        browse_p.clicked.connect(lambda: self._browse(self.ed_out_pbi))
+        og.addWidget(browse_p, 1, 2)
         og.setColumnStretch(1, 1)
         lay.addLayout(og)
+        note_out = self._mut("Each feature within a product writes to its own subfolder under that "
+                             "product's output folder (e.g. capacity_report, field_lineage, "
+                             "tenant_usage) - nothing lands loose in one shared folder.")
+        note_out.setWordWrap(True)
+        note_out.setStyleSheet("font-size: 8pt;")
+        lay.addWidget(note_out)
 
         note = self._mut("Secrets (Qlik API key, Power BI client secret) are never saved to disk - "
                          "re-enter them each session. Everything else is remembered.")
@@ -155,11 +170,11 @@ class SettingsDialog(QDialog):
         self.ed_p_kv.setEnabled(vault_mode)
         self.ed_p_kvsecret.setEnabled(vault_mode)
 
-    def _browse(self):
+    def _browse(self, lineedit):
         d = QFileDialog.getExistingDirectory(self, "Choose output folder",
-                                             self.ed_out.text() or os.path.expanduser("~"))
+                                             lineedit.text() or os.path.expanduser("~"))
         if d:
-            self.ed_out.setText(d)
+            lineedit.setText(d)
 
     def _on_save(self):
         pbi = {
@@ -171,7 +186,8 @@ class SettingsDialog(QDialog):
         }
         self._main.apply_settings(
             self.ed_q_tenant.text().strip(), self.ed_q_key.text(),
-            self.ed_out.text().strip(), pbi, self.ed_p_secret.text())
+            self.ed_out_qlik.text().strip(), self.ed_out_pbi.text().strip(),
+            pbi, self.ed_p_secret.text())
         self.accept()
 
 
@@ -192,7 +208,8 @@ class MainWindow(QMainWindow):
         # shared state
         self.tenant = ""
         self.api_key = ""            # in memory only
-        self.output_dir = ""
+        self.output_dir_qlik = ""
+        self.output_dir_powerbi = ""
         self.pbi = {"tenant_id": "", "client_id": "", "auth_mode": PBI_AUTH_MODES[0],
                     "key_vault_url": "", "key_vault_secret_name": ""}
         self.pbi_secret = ""         # in memory only
@@ -429,9 +446,11 @@ class MainWindow(QMainWindow):
     # ---------------- status ----------------
     def refresh_status(self):
         t = self.tenant or "(not set)"
-        o = self.output_dir or "(not set)"
-        if len(o) > 44:
-            o = "..." + o[-41:]
+
+        def short(p):
+            p = p or "(not set)"
+            return "..." + p[-27:] if len(p) > 30 else p
+
         if not self.api_key.strip():
             qlik = "Qlik: key not set"
         elif not getattr(self.qlik_view, "apps", None):
@@ -439,16 +458,19 @@ class MainWindow(QMainWindow):
         else:
             qlik = f"Qlik: {len(self.qlik_view.apps)} apps"
         pbi = "Power BI: " + (self.pbi.get("tenant_id") and "configured" or "not configured")
-        self.lbl_status.setText(f"Tenant:  {t}   •   Output:  {o}   •   {qlik}   •   {pbi}")
+        self.lbl_status.setText(
+            f"Tenant:  {t}   •   Qlik out:  {short(self.output_dir_qlik)}   •   "
+            f"PBI out:  {short(self.output_dir_powerbi)}   •   {qlik}   •   {pbi}")
 
     # ---------------- settings ----------------
     def _open_settings(self):
         SettingsDialog(self).exec()
 
-    def apply_settings(self, qlik_tenant, qlik_key, output_dir, pbi, pbi_secret):
+    def apply_settings(self, qlik_tenant, qlik_key, output_dir_qlik, output_dir_powerbi, pbi, pbi_secret):
         self.tenant = qlik_tenant
         self.api_key = qlik_key
-        self.output_dir = output_dir
+        self.output_dir_qlik = output_dir_qlik
+        self.output_dir_powerbi = output_dir_powerbi
         self.pbi = pbi
         self.pbi_secret = pbi_secret
         self._save_settings()
@@ -463,7 +485,13 @@ class MainWindow(QMainWindow):
             with open(SETTINGS_FILE, encoding="utf-8") as f:
                 s = json.load(f)
             self.tenant = s.get("tenant", "")
-            self.output_dir = s.get("output_dir", "")
+            # output_dir_qlik/output_dir_powerbi replace the old single
+            # "output_dir" -- fall back to it (both products shared one
+            # folder before) so settings saved by an earlier version still
+            # carry over instead of resetting to blank.
+            legacy = s.get("output_dir", "")
+            self.output_dir_qlik = s.get("output_dir_qlik") or legacy
+            self.output_dir_powerbi = s.get("output_dir_powerbi") or legacy
             saved_pbi = s.get("pbi", {}) or {}
             for k in self.pbi:
                 if k in saved_pbi:
@@ -473,14 +501,26 @@ class MainWindow(QMainWindow):
 
     def _save_settings(self):
         try:
-            data = {"tenant": self.tenant, "output_dir": self.output_dir, "pbi": self.pbi}
+            data = {"tenant": self.tenant, "output_dir_qlik": self.output_dir_qlik,
+                    "output_dir_powerbi": self.output_dir_powerbi, "pbi": self.pbi}
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
         except Exception:
             pass
 
+    def _active_output_dir(self):
+        """Which output folder 'Open output folder' should open -- whichever
+        product's workspace is on screen; Home falls back to Qlik, then
+        Power BI, since the button lives in the shared log card."""
+        idx = self.stack.currentIndex()
+        if idx == 2:
+            return self.output_dir_powerbi
+        if idx == 1:
+            return self.output_dir_qlik
+        return self.output_dir_qlik or self.output_dir_powerbi
+
     def _open_folder(self):
-        d = self.output_dir
+        d = self._active_output_dir()
         if d and os.path.isdir(d):
             try:
                 os.startfile(d)  # Windows
