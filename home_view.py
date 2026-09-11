@@ -12,8 +12,9 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QScrollArea, QFrame,
 )
 
+import reports
 from widgets import (
-    TEAL, WARN, GOOD, BAD, make_card, label, human_bytes,
+    TEAL, WARN, GOOD, BAD, make_card, label, head_label, human_bytes,
     KpiCard, MeterBar, kpi_row, ranked_bars, clear_layout,
 )
 
@@ -45,7 +46,38 @@ class HomeView(QWidget):
                                   "populate or refresh these cards.", "muted", wrap=True))
         self.body.addWidget(self._qlik_card())
         self.body.addWidget(self._powerbi_card())
+        self.body.addWidget(self._reports_card())
         self.body.addStretch(1)
+
+    # ---------------- recent reports ----------------
+    def _reports_card(self):
+        """The three newest runs in the library, so the overview answers 'what
+        has been run lately' without a trip to the Reports page."""
+        card = make_card()
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(16, 14, 16, 16)
+        lay.setSpacing(8)
+        head = QHBoxLayout()
+        head.addWidget(label("RECENT REPORTS", "section"))
+        head.addStretch(1)
+        b = QPushButton("LIBRARY \u2192")
+        b.setObjectName("ghost")
+        b.clicked.connect(lambda: self.shell.go_to("reports"))
+        head.addWidget(b)
+        lay.addLayout(head)
+
+        recent = reports.scan(self.shell.output_dir)
+        if not recent:
+            lay.addWidget(label("Nothing has been run into the library yet.", "muted", wrap=True))
+            return card
+        for rec in recent[:3]:
+            row = QHBoxLayout()
+            row.addWidget(head_label(rec.get("title", "(untitled)"), 11))
+            row.addWidget(label(reports.subtitle(rec), "muted"), 1)
+            lay.addLayout(row)
+        if len(recent) > 3:
+            lay.addWidget(label(f"+ {len(recent) - 3} more in the library", "muted"))
+        return card
 
     # ---------------- Qlik ----------------
     def _qlik_card(self):

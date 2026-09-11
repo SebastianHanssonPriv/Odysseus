@@ -95,13 +95,44 @@ shared library of the settled decisions above. The per-product `output_dir_qlik`
 and `output_dir_powerbi` settings are gone; `_load_settings` migrates from
 either one.
 
+## Report records
+
+`<workbook>.bbgs.json` sits beside each workbook:
+
+```json
+{ "schema": 1, "product": "Qlik", "type": "capacity_report",
+  "title": "Capacity report - full tenant", "created": "2026-09-10T06:00:00",
+  "scope": "214 apps", "duration_s": 401,
+  "file": "Qlik/capacity_report/capacity_report_20260910_060000.xlsx",
+  "headline": [{"label": "Billable app data", "value": 1840000000000,
+                "unit": "bytes", "display": "1.7 TB"}] }
+```
+
+`file` is relative to the library root, never absolute: the same synced library
+is mounted at a different local path on every machine, and an absolute path
+would break the moment a colleague opened it.
+
+The library index is the folder. There is no database, no server and no state
+outside the manifests, so two people pointing Studio at the same synced folder
+see each other's runs. That also means the settled "publish to SharePoint"
+sharing needs no share sheet: writing into the library IS publishing.
+
+Deletion and retention are never automatic. `Clean up old` lists what is older
+than 12 months and asks first, because the library is shared and a run deleted
+here is gone for everyone.
+
 ## Status
 
 - [x] Tokens, QSS and widget set
 - [x] 1. Router: both workspaces are a task hub plus one page per task, with a
       back arrow. `widgets.TaskHub` is the shared implementation.
 - [ ] 2. Shared scope object + scope sheet
-- [ ] 3. Report records (manifest, library, viewer)
+- [x] 3. Report records: every run writes a JSON manifest beside its workbook
+      (`reports.py`), and the Reports rail page lists the library with each
+      run's headline numbers and how they moved since the previous run of the
+      same type (`reports_view.py`). Home shows the three newest. No separate
+      report viewer: the detail already lives in the workbook, and the manifest
+      carries only the headline numbers the spec says a diff compares.
 - [~] 4. Log drawer: the panel is collapsed by default. Named run steps still
       to do.
 - [ ] 5. Sticky action bar

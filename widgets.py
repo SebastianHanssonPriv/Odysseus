@@ -107,6 +107,13 @@ def app_font():
     return QFont("Barlow", 10)
 
 
+# Heading sizes available to head_label(). The stylesheet rules below are
+# generated from this tuple so the two cannot drift apart.
+_HEAD_SIZES = (11, 12, 13, 15, 16)
+_HEAD_QSS = "\n".join(
+    f"QLabel#head{p} {{ color: {TEXT}; font-family: {FONT_HEAD}; "
+    f"font-weight: 600; font-size: {p}pt; }}" for p in _HEAD_SIZES)
+
 STYLE = f"""
 QWidget {{ background: {BG}; color: {TEXT}; font-family: {FONT_BODY}; font-size: 10pt; }}
 QLabel {{ background: transparent; }}
@@ -129,6 +136,7 @@ QLabel#kpiCaption {{ color: {MUTED}; font-family: {FONT_HEAD}; font-weight: 600;
 QLabel#kpiValue {{ color: {TEXT}; font-family: {FONT_HEAD}; font-weight: 600; font-size: 20pt; }}
 QLabel#kpiSub {{ color: {MUTED}; font-size: 8.5pt; }}
 QLabel#h1 {{ color: {TEXT}; font-family: {FONT_HEAD}; font-weight: 600; font-size: 14pt; }}
+{_HEAD_QSS}
 
 QPushButton#accent {{ background: {ACCENT}; color: #FFFFFF; border: none;
     border-radius: 0px; padding: 9px 18px; min-height: 22px;
@@ -254,6 +262,22 @@ def human_bytes(n):
             return f"{n:,.1f} {unit}" if unit != "B" else f"{int(n)} B"
         n /= 1024
     return f"{n:,.1f} TB"
+
+
+def head_label(text, pt):
+    """A heading or big number in the condensed face, at one of _HEAD_SIZES.
+
+    Sized by object name so the rule lives in the app-wide stylesheet. The two
+    alternatives both fail here: setFont is overridden by the global
+    `QWidget { font-size }` rule and silently renders at 10pt, and a
+    per-instance setStyleSheet is applied at polish time - after the layout has
+    already asked the label how tall it wants to be - which leaves a big number
+    clipped and overlapping the line beneath it."""
+    if pt not in _HEAD_SIZES:
+        pt = min(_HEAD_SIZES, key=lambda p: abs(p - pt))
+    lab = QLabel(text)
+    lab.setObjectName(f"head{pt}")
+    return lab
 
 
 def label(text, obj=None, wrap=False):
@@ -547,10 +571,7 @@ class TaskHub(QWidget):
         lay.setContentsMargins(16, 14, 16, 12)
         lay.setSpacing(6)
         head = QHBoxLayout()
-        t = QLabel(title)
-        t.setStyleSheet(f"font-family: {FONT_HEAD}; font-size: 13pt; font-weight: 600; "
-                        "background: transparent; border: none;")
-        head.addWidget(t)
+        head.addWidget(head_label(title, 13))
         head.addStretch(1)
         if badge:
             head.addWidget(Tag(badge, "bad" if badge == "writes" else "neutral"))
@@ -578,9 +599,7 @@ class TaskHub(QWidget):
         self.btn_back.setObjectName("ghost")
         self.btn_back.clicked.connect(lambda: self.open(-1))
         lay.addWidget(self.btn_back)
-        self.lbl_crumb = QLabel("")
-        self.lbl_crumb.setStyleSheet(f"font-family: {FONT_HEAD}; font-size: 12pt; "
-                                     "font-weight: 600; background: transparent;")
+        self.lbl_crumb = head_label("", 12)
         lay.addWidget(self.lbl_crumb)
         lay.addStretch(1)
         return bar
@@ -782,11 +801,17 @@ def kpi_row(specs):
 
 def clear_layout(lay):
     """Remove and delete every widget/sub-layout in a layout (used to re-render
-    a dashboard panel in place)."""
+    a dashboard panel in place).
+
+    setParent(None) before deleteLater is not belt-and-braces: deleteLater runs
+    on the next event-loop pass, so until then the widget is still a visible
+    child of the panel and the re-rendered content is drawn on top of the old
+    content. Reparenting takes it off screen now."""
     while lay.count():
         item = lay.takeAt(0)
         w = item.widget()
         if w:
+            w.setParent(None)
             w.deleteLater()
         else:
             child = item.layout()

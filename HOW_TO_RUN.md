@@ -165,6 +165,26 @@ delegated ownership, since a business-critical extractor tied to one
 person's account lifecycle is a continuity risk independent of what this
 tool can see.
 
+## 3b. Reports
+**Reports** in the nav rail is the library. Every scan, export and analysis
+files a small `.bbgs.json` record next to its workbook, and this page reads the
+library folder to list them, newest first, with each run's headline numbers and
+how they moved since the previous run of the same type.
+
+- **All / Qlik / Power BI** filters the list.
+- **Open workbook** opens the .xlsx; **Open folder** opens where it sits.
+- **Refresh** re-reads the folder. Use it to pick up runs a colleague has
+  written into the same synced library since you opened the page.
+- **Clean up old** lists everything older than 12 months and asks before
+  deleting. Nothing is removed automatically: the library is shared, so a run
+  you delete is gone for everyone.
+
+Because the index is nothing but the folder, **two people pointing Studio at
+the same synced library see each other's runs** with no server involved. A
+colleague without Studio just opens the workbooks from SharePoint.
+
+The **Home** overview shows the three newest runs and a link into the library.
+
 ## 4. Power BI workspace
 Same shape as the Qlik workspace: a hub of four tasks, one page each, with
 **← All tasks** to get back and the detail on hover.

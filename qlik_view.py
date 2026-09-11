@@ -11,6 +11,7 @@ All Qlik logic is reused unchanged from qlik_core / qlik_capacity.
 from __future__ import annotations
 
 import os
+import time
 import datetime
 import threading
 
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
 
 import qlik_core as core
 import qlik_capacity as qcap
+import reports
 from widgets import (
     TEAL, BAD, WARN, GOOD, ROW_HOVER, TaskHub,
     make_card, label, tip, ElidedLabel,
@@ -97,6 +99,12 @@ class QlikView(QWidget):
     def _feature_dir(self, name):
         """This feature's own subfolder inside the library: <library>/Qlik/<name>."""
         return self.shell.feature_dir("Qlik", name)
+
+    def _record(self, path, type_key, title, scope="", started=None, headline=()):
+        """File a finished run in the library index (REDESIGN_SPEC.md step 3)."""
+        reports.record(self.output_dir, path, "Qlik", type_key, title,
+                       scope=scope, started=started, headline=headline, log=self.log)
+        self.shell.reports_changed()
 
     def log(self, msg):
         self.shell.log(msg)
@@ -813,6 +821,8 @@ class QlikView(QWidget):
                          daemon=True).start()
 
     def _export_worker(self, tenant, key, out_dir, targets, flags):
+        t0 = time.time()
+        done = []
         try:
             for a in targets:
                 if self.shell.cancel_requested():
@@ -823,9 +833,17 @@ class QlikView(QWidget):
                     exporter.run(*flags)
                 except Exception as e:
                     self.log(f"ERROR exporting {a.get('name', a['guid'])}: {scrub(key, e)}")
+                    done.append(a.get("name", a["guid"]))
                 finally:
                     exporter.close()
             self.log("All exports finished.")
+            if done:
+                # One workbook per app, so the record points at the folder the
+                # run filled rather than at a single file.
+                self._record(out_dir, "metadata_export", "Metadata export",
+                             scope=f"{len(done)} apps", started=t0,
+                             headline=[reports.num("Apps exported", len(done)),
+                                       reports.num("Item types", sum(1 for f in flags if f))])
         finally:
             self.sig_done.emit("run")
 
@@ -849,6 +867,7 @@ class QlikView(QWidget):
                          daemon=True).start()
 
     def _analyze_worker(self, tenant, key, out_dir, targets):
+        t0 = time.time()
         measures, dims = [], []
         try:
             for a in targets:
@@ -896,6 +915,15 @@ class QlikView(QWidget):
                      f"{len(results['dimension_name_conflicts'])} dimension name-conflicts, "
                      f"{len(results['dimension_redundancy'])} dimension redundancy groups.")
             self.log(f"Report -> {os.path.basename(out_path)}")
+            self._record(out_path, "comparison_analysis", "Cross-app consistency",
+                         scope=f"{len(targets)} apps", started=t0, headline=[
+                             reports.num("Name conflicts",
+                                         len(results["measure_name_conflicts"])
+                                         + len(results["dimension_name_conflicts"])),
+                             reports.num("Redundancy groups",
+                                         len(results["measure_redundancy"])
+                                         + len(results["dimension_redundancy"])),
+                             reports.num("Master items", len(measures) + len(dims))])
         except Exception as e:
             self.log(f"ERROR: {scrub(key, e)}")
             self.sig_error.emit("Analysis failed", scrub(key, e))
@@ -922,6 +950,7 @@ class QlikView(QWidget):
                          daemon=True).start()
 
     def _usage_worker(self, tenant, key, out_dir, targets):
+        t0 = time.time()
         app_results = []
         try:
             for a in targets:
@@ -957,6 +986,15 @@ class QlikView(QWidget):
             self.log("Usage analysis finished.")
             if app_results:
                 self.sig_usage_result_q.emit(app_results)
+                cand = sum(len(r["result"]["fields"]["unused"])
+                           + len(r["result"]["master"]["unused"])
+                           + len(r["result"]["variables"]["unused"]) for r in app_results)
+                dyn = sum(len(r["result"]["dynamic"]) for r in app_results)
+                self._record(out_dir, "usage_analysis", "Usage & leanness",
+                             scope=f"{len(app_results)} apps", started=t0,
+                             headline=[reports.num("Candidates", cand),
+                                       reports.num("Dynamic expressions", dyn),
+                                       reports.num("Apps analysed", len(app_results))])
         finally:
             self.sig_done.emit("usage")
 
@@ -978,6 +1016,7 @@ class QlikView(QWidget):
                          daemon=True).start()
 
     def _capacity_worker(self, tenant, key, out_dir, with_orphans):
+        t0 = time.time()
         try:
             res = qcap.fetch_two_capacities(tenant, key, log=self.shell.sig_log.emit,
                                             with_orphans=with_orphans,
@@ -1000,8 +1039,23 @@ class QlikView(QWidget):
                 self.log(f"  Top duplicated report: '{t['base_name']}' - {t.get('count')} copies "
                          f"across {t.get('space_count')} spaces; "
                          f"{qcap.format_bytes(t.get('dedupe_savings_bytes'))} reclaimable if consolidated.")
-            qcap.write_capacity_report(res, out_dir, self.shell.sig_log.emit)
+            out_path = qcap.write_capacity_report(res, out_dir, self.shell.sig_log.emit)
             self.log("Capacity report finished.")
+            red2 = red or {}
+            inv = (res.get("app_reload") or {}).get("inventory", {}) or {}
+            persum = red2.get("personal_summary", {}) or {}
+            dup_bytes = sum(c.get("dedupe_savings_bytes", 0)
+                            for c in red2.get("duplicate_app_clusters", []))
+            self._record(out_path, "capacity_report", "Capacity report - full tenant",
+                         scope=f"{inv.get('totals', {}).get('app_count', 0)} apps",
+                         started=t0, headline=[
+                             reports.num("Billable app data",
+                                         persum.get("billable_bytes", 0), unit="bytes"),
+                             reports.num("Duplicate reclaim", dup_bytes, unit="bytes"),
+                             reports.num("Duplicate clusters",
+                                         len(red2.get("duplicate_app_clusters", []))),
+                             reports.num("Apps sized",
+                                         inv.get("totals", {}).get("sized_app_count", 0))])
         except qcap.ScanCancelled:
             self.log("Capacity scan cancelled - no report written.")
         except Exception as e:
@@ -1408,6 +1462,7 @@ class QlikView(QWidget):
             r["chain"] = resolved["chain"]
 
     def _qvd_usage_worker(self, tenant, key, out_dir, targets, trace_upstream):
+        t0 = time.time()
         app_rows = []
         chain_cache = {}  # qvd_file -> resolved chain dict, shared across all apps in this run
         try:
@@ -1443,6 +1498,14 @@ class QlikView(QWidget):
             self.sig_qvd_usage_done.emit(text)
             out_path = core.write_qvd_usage_report(app_rows, out_dir, self.shell.sig_log.emit)
             self.log(f"QVD field usage report -> {os.path.basename(out_path)}")
+            rows = [r for a in app_rows for r in a["rows"]]
+            confirmed = sum(1 for r in rows if r["status"] in core.QVD_CONFIRMED_STATUSES)
+            not_found = sum(1 for r in rows if r["status"] == "not_found_in_final_model")
+            self._record(out_path, "qvd_field_usage", "QVD field usage",
+                         scope=f"{len(app_rows)} apps", started=t0, headline=[
+                             reports.num("Fields checked", len(rows)),
+                             reports.num("Confirmed in model", confirmed),
+                             reports.num("Not found", not_found)])
         except Exception as e:
             self.log(f"ERROR: {scrub(key, e)}")
             self.sig_error.emit("QVD field usage scan failed", scrub(key, e))
@@ -1467,6 +1530,7 @@ class QlikView(QWidget):
                          daemon=True).start()
 
     def _tenant_usage_worker(self, tenant, key, out_dir):
+        t0 = time.time()
         def open_app_full(guid, _t=tenant, _k=key, _o=out_dir):
             exp = core.QlikExporter(_t, _k, guid, _o, self.shell.sig_log.emit)
             try:
@@ -1529,6 +1593,12 @@ class QlikView(QWidget):
                                                            self.shell.sig_log.emit,
                                                            space_lookup=space_lookup)
             self.log(f"Tenant QVD & field usage report -> {os.path.basename(out_path)}")
+            rows = [r for a in app_rows for r in a["rows"]]
+            self._record(out_path, "tenant_usage", "Tenant QVD & field usage",
+                         scope=f"{len(app_rows)} published apps", started=t0, headline=[
+                             reports.num("Published apps", len(app_rows)),
+                             reports.num("QVDs referenced", len(qvd_ref_rows)),
+                             reports.num("Field rows", len(rows))])
         except Exception as e:
             self.log(f"ERROR: {scrub(key, e)}")
             self.sig_error.emit("Tenant usage scan failed", scrub(key, e))

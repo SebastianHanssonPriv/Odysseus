@@ -31,6 +31,7 @@ from widgets import (
 )
 from qlik_view import QlikView
 from powerbi_view import PowerBIView
+from reports_view import ReportsView
 from home_view import HomeView
 
 SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".bufab_bi_studio.json")
@@ -203,6 +204,7 @@ class SettingsDialog(QDialog):
 # ============================================================
 class MainWindow(QMainWindow):
     sig_log = Signal(str)
+    sig_reports_changed = Signal()
 
     def __init__(self):
         super().__init__()
@@ -234,6 +236,7 @@ class MainWindow(QMainWindow):
         self._busy_timer.timeout.connect(self._busy_tick)
 
         self.sig_log.connect(self._append_log)
+        self.sig_reports_changed.connect(self._on_reports_changed)
 
         self._build()
         self._load_settings()
@@ -299,7 +302,9 @@ class MainWindow(QMainWindow):
         self.powerbi_view = PowerBIView(self)
         self.stack.addWidget(self.home_view)       # 0
         self.stack.addWidget(self.qlik_view)       # 1
+        self.reports_view = ReportsView(self)
         self.stack.addWidget(self.powerbi_view)    # 2
+        self.stack.addWidget(self.reports_view)    # 3
         cl.addWidget(self.stack, 1)
 
         cl.addWidget(self._build_log_card())
@@ -347,7 +352,8 @@ class MainWindow(QMainWindow):
         self._nav_group = QButtonGroup(self)
         self._nav_group.setExclusive(True)
         self._nav_buttons = {}
-        for key, text in (("home", "  Home"), ("qlik", "  Qlik"), ("powerbi", "  Power BI")):
+        for key, text in (("home", "  Home"), ("qlik", "  Qlik"), ("powerbi", "  Power BI"),
+                          ("reports", "  Reports")):
             b = QPushButton(text)
             b.setObjectName("nav")
             b.setCheckable(True)
@@ -410,11 +416,31 @@ class MainWindow(QMainWindow):
 
     # ---------------- navigation ----------------
     def go_to(self, key):
-        idx = {"home": 0, "qlik": 1, "powerbi": 2}.get(key, 0)
+        idx = {"home": 0, "qlik": 1, "powerbi": 2, "reports": 3}.get(key, 0)
         self.stack.setCurrentIndex(idx)
         btn = self._nav_buttons.get(key)
         if btn and not btn.isChecked():
             btn.setChecked(True)
+        if key == "reports":
+            # The library is a folder, so it can change without this app doing
+            # anything - a colleague's run, a file deleted in Explorer. Re-read
+            # it every time the page is opened rather than trusting a cache.
+            self.reports_view.refresh()
+
+    def reports_changed(self):
+        """A run just filed a report in the library. Called from worker
+        THREADS, so it only emits - touching widgets off the GUI thread is
+        undefined behaviour, which is why every other worker callback in this
+        app goes through a signal too."""
+        self.sig_reports_changed.emit()
+
+    def _on_reports_changed(self):
+        """GUI thread. Rebuild whichever page shows the library."""
+        idx = self.stack.currentIndex()
+        if idx == 3:
+            self.reports_view.refresh()
+        elif idx == 0:
+            self.home_view.refresh()
 
     # ---------------- logging ----------------
     def log(self, msg):

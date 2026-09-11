@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import datetime
 import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal, QDate
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from config import Settings
+import reports
 from widgets import (
     TEAL, WARN, GOOD, BAD, TaskHub, make_card, label, tip, kpi_row, line_chart, ranked_bars,
     colored_table, clear_layout,
@@ -54,6 +56,12 @@ class PowerBIView(QWidget):
 
     def log(self, msg):
         self.shell.log(msg)
+
+    def _record(self, path, type_key, title, scope="", started=None, headline=()):
+        """File a finished run in the library index (REDESIGN_SPEC.md step 3)."""
+        reports.record(self.shell.output_dir, str(path), "Power BI", type_key, title,
+                       scope=scope, started=started, headline=headline, log=self.log)
+        self.shell.reports_changed()
 
     def _data_dir(self) -> Path | None:
         if not self.shell.output_dir:
@@ -319,6 +327,7 @@ class PowerBIView(QWidget):
                          daemon=True).start()
 
     def _collect_worker(self, settings, data_dir, d_from, d_to, skip_existing):
+        t0 = time.time()
         try:
             from auth import PowerBITokenProvider
             from powerbi_client import PowerBIAdminClient
@@ -355,6 +364,12 @@ class PowerBIView(QWidget):
             tail = "CANCELLED" if cancelled else "done"
             self.log(f"Collect {tail}: {days_pulled} day(s) pulled ({total_events} events), "
                      f"{days_skipped} already present.")
+            if days_pulled and not cancelled:
+                self._record(out_dir, "collect", "Activity events collected",
+                             scope=f"{d_from.isoformat()} to {d_to.isoformat()}", started=t0,
+                             headline=[reports.num("Events", total_events),
+                                       reports.num("Days pulled", days_pulled),
+                                       reports.num("Days already present", days_skipped)])
         except Exception as e:
             self.log(f"ERROR collecting: {e}")
             self.sig_error.emit("Collect failed",
@@ -379,10 +394,15 @@ class PowerBIView(QWidget):
                          daemon=True).start()
 
     def _raw_worker(self, data_dir, want_parquet, want_csv):
+        t0 = time.time()
         try:
             import raw_export
             raw_export.export(data_dir, want_parquet=want_parquet, want_csv=want_csv)
             self.log(f"Raw export written under {(data_dir / 'raw')}")
+            fmts = ", ".join(f for f, on in (("Parquet", want_parquet), ("CSV", want_csv)) if on)
+            self._record(data_dir / "raw", "raw_export", "Raw event export",
+                         scope=fmts, started=t0,
+                         headline=[reports.num("Formats", len(fmts.split(", ")))])
         except SystemExit as e:
             self.log(f"Raw export: {e}")
             self.sig_error.emit("Raw export", str(e))
@@ -405,6 +425,7 @@ class PowerBIView(QWidget):
         threading.Thread(target=self._analytics_worker, args=(data_dir,), daemon=True).start()
 
     def _analytics_worker(self, data_dir):
+        t0 = time.time()
         try:
             import analytics
             frames = analytics.compute(data_dir)          # one load, shared with the CSVs
@@ -426,6 +447,11 @@ class PowerBIView(QWidget):
             self.sig_usage_data.emit(records)
             self.log(f"Usage analytics complete - {len(records):,} usage rows across "
                      f"{rud['report'].nunique()} reports.")
+            self._record(out_dir, "usage_analytics", "Usage analytics",
+                         scope=f"{rud['date'].nunique()} days of events", started=t0,
+                         headline=[reports.num("Total views", int(rud["views"].sum())),
+                                   reports.num("Reports viewed", int(rud["report"].nunique())),
+                                   reports.num("Active users", int(rud["user"].nunique()))])
         except SystemExit as e:
             self.log(f"Usage analytics: {e}")
             self.sig_error.emit("Usage analytics", str(e))
@@ -454,6 +480,7 @@ class PowerBIView(QWidget):
         threading.Thread(target=self._lineage_worker, args=(settings, data_dir), daemon=True).start()
 
     def _lineage_worker(self, settings, data_dir):
+        t0 = time.time()
         try:
             from auth import PowerBITokenProvider
             from powerbi_client import PowerBIAdminClient
@@ -473,6 +500,14 @@ class PowerBIView(QWidget):
             self.sig_lineage_done.emit(text)
             out_path = write_model_lineage_report(results, data_dir / "model_lineage", self.shell.sig_log.emit)
             self.log(f"Model lineage report -> {Path(out_path).name}")
+            datasets = {r.get("dataset_id") for r in results if r.get("dataset_id")}
+            tables = sum(1 for r in results if r.get("status") != "dataset_has_no_tables")
+            unresolved = sum(1 for r in results if r.get("status") == "no_expression_available")
+            self._record(out_path, "model_lineage", "Model lineage",
+                         scope=f"{len(datasets)} semantic models", started=t0,
+                         headline=[reports.num("Tables resolved", tables),
+                                   reports.num("Semantic models", len(datasets)),
+                                   reports.num("No expression available", unresolved)])
         except Exception as e:
             self.log(f"ERROR scanning model lineage: {e}")
             self.sig_error.emit("Model lineage scan failed",
