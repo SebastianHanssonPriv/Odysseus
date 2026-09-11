@@ -335,27 +335,6 @@ Same shape as the Qlik workspace: a hub of five tasks, one page each, with
   environment — a baseline ahead of the move to Fabric and Gen2 dataflows;
   see model_lineage.py if that adds Gen2 support later.
 
-### Run it daily (unattended) — until Fabric takes over
-There is no automatic collection yet. Two ways to keep the daily history flowing:
-
-1. **Manual / catch-up (no setup):** open **Power BI -> Collect** and either pull
-   a range or click **Catch up (last 28 days)**. Skipped days mean you only ever
-   pull what's missing, so doing it whenever you remember is fine.
-2. **Scheduled service (set once, runs itself):** `collect_daily.bat` collects
-   *yesterday* headlessly. Configure it once, then register a Windows Scheduled
-   Task:
-   - Copy `.env.example` -> `.env`; fill in `PBI_TENANT_ID`, `PBI_CLIENT_ID`, and
-     a **Key Vault** (recommended) or managed-identity credential — an unattended
-     task can't use a secret typed into the app each session.
-   - Set `OUTPUT_DIR` in `.env` to your app's `<library folder>\powerbi_data`
-     so the in-app dashboard reads the scheduled collections too.
-   - **Task Scheduler -> Create Task** -> Trigger: Daily, ~06:00 local -> Action:
-     *Start a program* -> Program: `collect_daily.bat`, "Start in" = this folder.
-     Tick *Run whether the user is logged on or not*.
-   Each run appends one day; **Usage analytics** then visualises the accumulated
-   history. This feeds a Power BI semantic model for usage reporting until the
-   move to Fabric in winter-26 / spring-27.
-
 ### Dataflow field impact
 The Power BI counterpart of **Landed QVD impact**. A Gen1 dataflow entity is
 Power BI's answer to a QVD — a table staged by a separate artifact and then
@@ -408,6 +387,27 @@ Everything depends on the tenant setting **Enhance admin APIs responses with
 DAX and mashup expressions**. Without it every table comes back as
 `no_expression_available` and nothing resolves. Gen2 (Fabric) dataflows and
 lakehouse shortcuts are not Gen1 dataflow hops and will not appear here.
+
+### Run it daily (unattended) — until Fabric takes over
+There is no automatic collection yet. Two ways to keep the daily history flowing:
+
+1. **Manual / catch-up (no setup):** open **Power BI -> Collect** and either pull
+   a range or click **Catch up (last 28 days)**. Skipped days mean you only ever
+   pull what's missing, so doing it whenever you remember is fine.
+2. **Scheduled service (set once, runs itself):** `collect_daily.bat` collects
+   *yesterday* headlessly. Configure it once, then register a Windows Scheduled
+   Task:
+   - Copy `.env.example` -> `.env`; fill in `PBI_TENANT_ID`, `PBI_CLIENT_ID`, and
+     a **Key Vault** (recommended) or managed-identity credential — an unattended
+     task can't use a secret typed into the app each session.
+   - Set `OUTPUT_DIR` in `.env` to your app's `<library folder>\powerbi_data`
+     so the in-app dashboard reads the scheduled collections too.
+   - **Task Scheduler -> Create Task** -> Trigger: Daily, ~06:00 local -> Action:
+     *Start a program* -> Program: `collect_daily.bat`, "Start in" = this folder.
+     Tick *Run whether the user is logged on or not*.
+   Each run appends one day; **Usage analytics** then visualises the accumulated
+   history. This feeds a Power BI semantic model for usage reporting until the
+   move to Fabric in winter-26 / spring-27.
 
 ## 5. Home
 Opens on a cross-product overview: Qlik billed-capacity % + reclaim, and Power BI
