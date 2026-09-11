@@ -44,6 +44,11 @@ HEADER_LOGO = os.path.join(BASE_DIR, "bufab_header.png")
 
 PBI_AUTH_MODES = ["Client secret (in-memory)", "Key Vault", "Managed identity"]
 
+# Layout constants for the width breakpoints (REDESIGN_SPEC.md).
+NAV_WIDTH = 184
+NAV_WIDTH_WIDE = 220
+CONTENT_MAX_WIDTH = 1600
+
 
 # ============================================================
 #  Unified settings dialog
@@ -250,13 +255,21 @@ class MainWindow(QMainWindow):
         main.setSpacing(0)
         root.addLayout(main, 1)
 
-        main.addWidget(self._build_nav())
+        self.nav = self._build_nav()
+        main.addWidget(self.nav)
 
         content = QWidget()
+        content.setMaximumWidth(CONTENT_MAX_WIDTH)
         cl = QVBoxLayout(content)
         cl.setContentsMargins(16, 12, 16, 16)
         cl.setSpacing(12)
-        main.addWidget(content, 1)
+        # Centre the content and cap it, so an ultrawide monitor does not
+        # stretch the tables (REDESIGN_SPEC.md, 'Breakpoints'). The lopsided
+        # stretch factors give the content everything up to its maximum width
+        # and only then split what is left between the two margins.
+        main.addStretch(1)
+        main.addWidget(content, 1000)
+        main.addStretch(1)
 
         # status + busy row
         top = QHBoxLayout()
@@ -293,6 +306,7 @@ class MainWindow(QMainWindow):
 
         cl.addWidget(self._build_log_card())
         self.go_to("home")
+        self._apply_breakpoint(self.width())
 
     def _build_header(self):
         head = QFrame()
@@ -328,7 +342,7 @@ class MainWindow(QMainWindow):
     def _build_nav(self):
         nav = QFrame()
         nav.setObjectName("nav")
-        nav.setFixedWidth(184)
+        nav.setFixedWidth(NAV_WIDTH)
         lay = QVBoxLayout(nav)
         lay.setContentsMargins(0, 12, 0, 12)
         lay.setSpacing(2)
@@ -357,7 +371,7 @@ class MainWindow(QMainWindow):
         head = QHBoxLayout()
         head.addWidget(label("LOG", "section"))
         head.addStretch(1)
-        self.btn_toggle_log = QPushButton("Hide log")
+        self.btn_toggle_log = QPushButton("Show log")
         self.btn_toggle_log.setObjectName("ghost")
         self.btn_toggle_log.clicked.connect(self._toggle_log)
         b_clear = QPushButton("Clear log")
@@ -373,8 +387,26 @@ class MainWindow(QMainWindow):
         self.log_box = QPlainTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.setMinimumHeight(60)
+        self.log_box.setVisible(False)
         lay.addWidget(self.log_box, 1)
         return card
+
+    # ---------------- responsive breakpoints ----------------
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # _build creates the rail before the workspaces, and a resize can
+        # arrive mid-build, so only react once both exist.
+        if getattr(self, "nav", None) is not None and getattr(self, "qlik_view", None) is not None:
+            self._apply_breakpoint(self.width())
+
+    def _apply_breakpoint(self, w):
+        """REDESIGN_SPEC.md, 'Breakpoints'. Two things react to window width
+        so far: how wide the nav rail is, and how many columns the Qlik task
+        hub lays out."""
+        rail = NAV_WIDTH_WIDE if w >= 1440 else NAV_WIDTH
+        if self.nav.width() != rail:
+            self.nav.setFixedWidth(rail)
+        self.qlik_view.set_hub_columns(2 if w < 1040 else 3)
 
     # ---------------- navigation ----------------
     def go_to(self, key):

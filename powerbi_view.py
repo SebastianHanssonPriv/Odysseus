@@ -240,9 +240,9 @@ class PowerBIView(QWidget):
         ml.setContentsMargins(0, 10, 0, 0)
         mc = make_card()
         mcl = QVBoxLayout(mc)
-        mcl.addWidget(label("MODEL LINEAGE  (semantic model table -> warehouse source, direct or "
-                            "through a Gen1 dataflow)", "section"))
-        mcl.addWidget(label("Tenant-wide scan via the Admin Scanner API - no workspace selection "
+        mcl.addWidget(label("MODEL LINEAGE", "section"))
+        mcl.addWidget(label("Semantic model table to warehouse source, direct or through a Gen1 "
+                            "dataflow. Tenant-wide scan via the Admin Scanner API - no workspace selection "
                             "needed. Needs the tenant setting 'Enhance admin APIs responses with DAX "
                             "and mashup expressions' enabled, or every table comes back as "
                             "no_expression_available (see the Excel report's warning sheet). Writes "
