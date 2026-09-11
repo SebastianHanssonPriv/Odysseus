@@ -25,11 +25,12 @@ from PySide6.QtWidgets import (
 
 import qlik_core as core
 import qlik_capacity as qcap
+import qlik_landed as landed
 import reports
 from scope_sheet import ScopeBar
 from widgets import (
     TEAL, BAD, WARN, GOOD, ActionBar, TaskHub,
-    make_card, label, tip,
+    make_card, label, tip, Banner,
     key_format_ok, scrub, friendly_load_error, human_bytes,
     MeterBar, kpi_row, ranked_bars, colored_table, clear_layout,
 )
@@ -50,6 +51,7 @@ class QlikView(QWidget):
     sig_qvd_usage_done = Signal(str)
     sig_tenant_usage_done = Signal(str)
     sig_diag_visibility_done = Signal(str)
+    sig_landed_done = Signal(str)
     sig_index_built = Signal(int, object)
     sig_capacity_result = Signal(object)
     sig_consistency_result = Signal(object)
@@ -72,6 +74,7 @@ class QlikView(QWidget):
         self.sig_qvd_usage_done.connect(self._on_qvd_usage_text)
         self.sig_tenant_usage_done.connect(self._on_tenant_usage_text)
         self.sig_diag_visibility_done.connect(self._on_diag_visibility_text)
+        self.sig_landed_done.connect(self._on_landed_text)
         self.sig_index_built.connect(self._on_index_built)
         self.sig_capacity_result.connect(self._render_capacity)
         self.sig_consistency_result.connect(self._render_consistency)
@@ -431,6 +434,41 @@ class QlikView(QWidget):
                      "through every upstream app that feeds them.", "tenant-wide",
                      bar=self.bar_tenant)
 
+        # Landed QVD impact
+        tab_li = QWidget()
+        lil = QVBoxLayout(tab_li)
+        lil.setContentsMargins(0, 10, 0, 0)
+        lic = make_card()
+        licl = QVBoxLayout(lic)
+        licl.addWidget(label("LANDED QVD FIELD IMPACT", "section"))
+        licl.addWidget(label('Every field in every QVD written by an app with "extractor" in its '
+                             "name, and what depends on it.", "muted"))
+        licl.addWidget(Banner(
+            "Criticality here is STRUCTURAL, not usage. Qlik Cloud exposes no per-app "
+            "opened-by-user telemetry through any API, so there is no daily, monthly, "
+            "quarterly or yearly active-user figure to be had - a number claiming to be one "
+            "would be invented. The tier is built from how much the estate depends on an app: "
+            "published, feeds other apps, how much is built on it, still being reloaded.",
+            "warn"))
+        lil.addWidget(lic)
+        self.landed_panel = QPlainTextEdit()
+        self.landed_panel.setReadOnly(True)
+        self.landed_panel.setMinimumHeight(150)
+        lil.addWidget(self.landed_panel, 1)
+        self.btn_landed = QPushButton("Scan landed impact")
+        tip(self.btn_landed, 
+            "For every field in every landed QVD: whether anything downstream depends on it, "
+            "and in each consuming app whether it reaches the data model and is referenced, "
+            "reaches the model and is referenced by nothing, or never reaches the model at "
+            "all.\n\nAlso flags a landed QVD nothing reads, a field renamed on the way in, "
+            "and a field the script computes rather than carries.\n\nNo app selection "
+            "needed, but it opens every app on the tenant, so it takes a while.")
+        self.btn_landed.clicked.connect(self._on_landed)
+        self.bar_landed = ActionBar(self.btn_landed,
+                                    status="Tenant-wide  ·  no scope needed  ·  opens every app")
+        self.hub.add(tab_li, "Landed QVD impact", 'Every field in every "extractor" QVD, and '
+                     "what downstream depends on it.", "tenant-wide", bar=self.bar_landed)
+
         # Diagnose visibility is its own task: it is troubleshooting, not part
         # of a tenant scan, and it needs no app selection.
         tab_d = QWidget()
@@ -609,6 +647,8 @@ class QlikView(QWidget):
             self.btn_index.setEnabled(True)
         elif which == "diag_visibility":
             self.btn_diag_visibility.setEnabled(True)
+        elif which == "landed":
+            self.btn_landed.setEnabled(True)
 
     # ---------------- export ----------------
     def _on_run(self):
@@ -1453,6 +1493,97 @@ class QlikView(QWidget):
             self.sig_error.emit("Tenant usage scan failed", scrub(key, e))
         finally:
             self.sig_done.emit("tenant_usage")
+
+    # ---------------- landed QVD impact ----------------
+    def _on_landed_text(self, text):
+        self.landed_panel.setPlainText(text)
+
+    def _on_landed(self):
+        if self._need_settings():
+            return
+        if not self.output_dir:
+            QMessageBox.warning(self, "Missing settings", "Set a library folder in Settings.")
+            return
+        self.btn_landed.setEnabled(False)
+        self.shell.busy_begin("Scanning landed QVD impact",
+                              ["List apps", "Read each app", "Write report"])
+        self.log("Scanning landed QVD field impact (tenant-wide) ...")
+        threading.Thread(target=self._landed_worker,
+                         args=(self.tenant, self.api_key,
+                               self._feature_dir("landed_impact")),
+                         daemon=True).start()
+
+    def _landed_worker(self, tenant, key, out_dir):
+        t0 = time.time()
+        try:
+            self.shell.run_step(0)
+            spaces = {}
+            try:
+                spaces = core.list_spaces(tenant, key)
+            except Exception as e:
+                self.log(f"  (space list unavailable: {scrub(key, e)})")
+            apps = core.list_apps(tenant, key)
+            for a in apps:
+                sid = a.get("space_id")
+                a["space_name"] = "Personal" if not sid else spaces.get(sid, sid)
+            self.log(f"  {len(apps)} app(s) on the tenant.")
+            self.shell.run_step(1, f"{len(apps)} apps")
+
+            seen = [0]
+
+            def read_app(guid, _t=tenant, _k=key, _o=out_dir):
+                """One engine session per app: script, model, objects, usage."""
+                seen[0] += 1
+                self.shell.run_progress(seen[0], len(apps), "apps read")
+                exp = core.QlikExporter(_t, _k, guid, _o, self.shell.sig_log.emit)
+                try:
+                    exp.connect()
+                    h = exp.call(-1, "OpenDoc", [guid])["qReturn"]["qHandle"]
+                    model_fields = exp.fetch_model_fields(h)
+                    measures = exp.fetch_measures(h)
+                    dims = exp.fetch_dimensions(h)
+                    variables = exp.fetch_variables(h)
+                    objects = exp.fetch_objects(h)
+                    return {
+                        "script": exp.fetch_script(h),
+                        "model_fields": model_fields,
+                        "objects": objects,
+                        "usage_result": core.analyze_usage(measures, dims, variables,
+                                                           objects, model_fields),
+                    }
+                except Exception as e:
+                    self.shell.sig_log.emit(f"  (could not open {guid}: {scrub(_k, e)})")
+                    return None
+                finally:
+                    exp.close()
+
+            res = landed.scan_landed_impact(apps, read_app, log=self.shell.sig_log.emit,
+                                            cancel_check=self.shell.cancel_requested)
+            if res is None:
+                self.log("Landed impact scan cancelled - no report written.")
+                return
+            self.sig_landed_done.emit(landed.render_text(res))
+            if not res["extractors"]:
+                self.log('No app has "extractor" in its name - nothing to report.')
+                return
+            self.shell.run_step(2, f"{len(res['fields'])} field rows")
+            out_path = landed.write_report(res, out_dir, self.shell.sig_log.emit)
+            self.shell.run_finish()
+            impact = sum(1 for r in res["fields"] if r["has_impact"])
+            carried = sum(1 for r in res["fields"]
+                          if r["best_state"] == landed.STATE_IN_MODEL_UNUSED)
+            dead = sum(1 for q in res["qvds"] if not q["read_by_apps"])
+            self._record(out_path, "landed_impact", "Landed QVD field impact",
+                         scope=f"{len(res['extractors'])} extractor apps", started=t0,
+                         headline=[reports.num("Landed fields", len(res["fields"])),
+                                   reports.num("With impact", impact),
+                                   reports.num("Carried, unused", carried),
+                                   reports.num("QVDs nothing reads", dead)])
+        except Exception as e:
+            self.log(f"ERROR scanning landed impact: {scrub(key, e)}")
+            self.sig_error.emit("Landed impact scan failed", scrub(key, e))
+        finally:
+            self.sig_done.emit("landed")
 
     # ---------------- diagnose app visibility ----------------
     def _on_diag_visibility_text(self, text):

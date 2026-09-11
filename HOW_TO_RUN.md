@@ -128,7 +128,7 @@ selection.
 
 Then open a task from the hub: **Extract metadata · Comparison analysis · Usage &
 leanness · Apply master items · QVD field usage · Trace a field · Capacity
-report · Tenant QVD usage · Diagnose visibility**. One task fills the page at a
+report · Tenant QVD usage · Landed QVD impact · Diagnose visibility**. One task fills the page at a
 time; **← All tasks** in the breadcrumb goes back to the hub. Hover a button or
 checkbox for the full explanation of what it does.
 
@@ -225,6 +225,50 @@ organizational: move the app into a shared/managed space with proper
 delegated ownership, since a business-critical extractor tied to one
 person's account lifecycle is a continuity risk independent of what this
 tool can see.
+
+### Landed QVD impact
+A "landed" QVD is one written by an app with **extractor** in its name — the apps
+that pull data onto the platform from outside it. This task answers, for every
+field in every landed QVD, what actually depends on it. Tenant-wide, no scope
+needed, but it opens every app, so allow time.
+
+Each field gets one of five states **per consuming app**:
+
+| State | Meaning |
+|---|---|
+| `in model, referenced` | Reaches the app's data model **and** a measure, dimension or visual references it. This is what "has impact" means. |
+| `in model, unused` | Reaches the model, nothing references it. Loaded and carried, paying storage and reload time for nothing. |
+| `script only` | The load script reads it but it never reaches the final model: dropped, joined away, aggregated into something else, or renamed past recognition. |
+| `in model, other table` | Present under a different table than the script suggested. Check it; not a verdict either way. |
+| `wildcard` | A wildcard folder load, whose fields no script parse can enumerate. The QVD's fields are simply unknown from the script. |
+
+Five sheets: **Field impact** (one row per QVD field, rolled up across every app
+that reads it, with `Has impact`, whether it is renamed anywhere, and whether it
+is computed rather than carried), **Field reach** (one row per field per app),
+**Landed QVDs** (including any nothing reads at all — usually the most
+actionable finding), **Criticality**, and a **Summary** that states the limits.
+
+**Criticality is structural, not usage.** Qlik Cloud exposes no per-app
+opened-by-user telemetry through any API — not the Audits API, not the
+monitoring apps. That was verified against this tenant over 500 real audit
+events and against Qlik's own Consumption Monitor: only reload/ETL activity and
+capacity billing are available. So there is **no DAU/MAU/QAU/YAU to report**,
+and a figure claiming to be one would be invented. The tier is built instead
+from how much the estate depends on the app: published (+2), feeds other apps
+with its own QVDs (+2, or +3 for three or more), 15+ visual objects (+1) or 40+
+(+2), references 50+ landed fields (+1), reloaded within 7 days (+1), no reload
+recorded or none in 90 days (-1). High from 5, Medium from 3. The Criticality
+sheet shows every component per app, so a tier can be argued with.
+
+Two limits worth knowing before acting on it. A field marked without impact is
+**not** automatically safe to drop: check its state, and check the wildcard and
+other-table rows by hand. And any app this API key cannot open appears on no
+sheet, so its dependencies are invisible here — personal-space apps owned by
+other people are the usual cause, and **Diagnose visibility** confirms it for a
+given app.
+
+If your extractor apps are named by another convention, change
+`EXTRACTOR_TOKEN` in `qlik_landed.py`.
 
 ## 3b. Reports
 **Reports** in the nav rail is the library. Every scan, export and analysis
