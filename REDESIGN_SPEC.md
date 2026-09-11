@@ -106,6 +106,18 @@ or shared. Saving a library also lays out the feature folders and writes a
 README.txt describing them, because the folder is something colleagues open in
 SharePoint.
 
+## Scope
+
+`shell.scope` is a set of app GUIDs and `shell.apps` the loaded list; every
+Qlik task reads `shell.scope_targets()`. The scope is saved to settings, so it
+survives a restart, and `set_apps` drops any GUID the tenant no longer returns.
+Only `ScopeSheet` writes it, and only on accept.
+
+`qlik_core.list_apps` now also keeps `reloaded` and `published` from the Items
+payload it was already fetching. Both are best-effort: Qlik has moved these
+fields between API versions, so a filter that depends on one is hidden when no
+app in the list has it, rather than matching nothing.
+
 ## Report records
 
 `<workbook>.bbgs.json` sits beside each workbook:
@@ -137,7 +149,12 @@ here is gone for everyone.
 - [x] Tokens, QSS and widget set
 - [x] 1. Router: both workspaces are a task hub plus one page per task, with a
       back arrow. `widgets.TaskHub` is the shared implementation.
-- [ ] 2. Shared scope object + scope sheet
+- [x] 2. Shared scope object + scope sheet: `shell.scope` is the single
+      selection, persisted in settings; `scope_sheet.py` holds the picker
+      (`ScopeSheet`, screen 1f) and the one-line summary that replaced the
+      permanent table (`ScopeBar`). Power BI has nothing to scope yet - all
+      four of its tasks are tenant-wide or date-ranged - so the settled
+      "workspace + report" scope waits until a task needs it.
 - [x] 3. Report records: every run writes a JSON manifest beside its workbook
       (`reports.py`), and the Reports rail page lists the library with each
       run's headline numbers and how they moved since the previous run of the

@@ -67,6 +67,7 @@ python -m PyInstaller --onefile --windowed --name BufabBIGovernanceStudio ^
   --hidden-import reports ^
   --hidden-import reports_view ^
   --hidden-import sharepoint ^
+  --hidden-import scope_sheet ^
   studio_app.py
 if errorlevel 1 goto :error
 

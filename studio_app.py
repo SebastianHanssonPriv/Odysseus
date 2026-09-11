@@ -250,6 +250,7 @@ class SettingsDialog(QDialog):
 class MainWindow(QMainWindow):
     sig_log = Signal(str)
     sig_reports_changed = Signal()
+    sig_scope_changed = Signal()
 
     def __init__(self):
         super().__init__()
@@ -264,6 +265,10 @@ class MainWindow(QMainWindow):
         self.api_key = ""            # in memory only
         self.output_dir = ""         # the library: one root for everything written
         self.library_url = ""        # the SharePoint address that folder syncs
+        # Scope is global and persistent (REDESIGN_SPEC.md, structural change
+        # 2): one selection every Qlik task reads, edited only by ScopeSheet.
+        self.apps = []               # the loaded Qlik app list
+        self.scope = set()           # selected app GUIDs
         self.pbi = {"tenant_id": "", "client_id": "", "auth_mode": PBI_AUTH_MODES[0],
                     "key_vault_url": "", "key_vault_secret_name": ""}
         self.pbi_secret = ""         # in memory only
@@ -283,6 +288,7 @@ class MainWindow(QMainWindow):
 
         self.sig_log.connect(self._append_log)
         self.sig_reports_changed.connect(self._on_reports_changed)
+        self.sig_scope_changed.connect(self._on_scope_changed)
 
         self._build()
         self._load_settings()
@@ -473,6 +479,35 @@ class MainWindow(QMainWindow):
             # it every time the page is opened rather than trusting a cache.
             self.reports_view.refresh()
 
+    # ---------------- scope ----------------
+    def set_scope(self, guids):
+        """Replace the selection. Called from the GUI thread only (the scope
+        sheet and the app loader)."""
+        self.scope = {g for g in guids if g}
+        self._save_settings()
+        self.sig_scope_changed.emit()
+
+    def scope_targets(self):
+        """The selected apps as the dicts the workers expect, in list order, so
+        a task always sees them in the same order the picker showed them."""
+        chosen = self.scope
+        return [a for a in self.apps if a["guid"] in chosen]
+
+    def set_apps(self, apps):
+        """A fresh app list. Any scoped GUID that is no longer on the tenant is
+        dropped, so a deleted app cannot linger in the scope forever."""
+        self.apps = apps
+        live = {a["guid"] for a in apps}
+        kept = self.scope & live
+        if kept != self.scope:
+            self.scope = kept
+            self._save_settings()
+        self.sig_scope_changed.emit()
+
+    def _on_scope_changed(self):
+        self.qlik_view.scope_bar.refresh()
+        self.refresh_status()
+
     def reports_changed(self):
         """A run just filed a report in the library. Called from worker
         THREADS, so it only emits - touching widgets off the GUI thread is
@@ -561,10 +596,10 @@ class MainWindow(QMainWindow):
 
         if not self.api_key.strip():
             qlik = "Qlik: key not set"
-        elif not getattr(self.qlik_view, "apps", None):
+        elif not self.apps:
             qlik = "Qlik: click Load apps"
         else:
-            qlik = f"Qlik: {len(self.qlik_view.apps)} apps"
+            qlik = f"Qlik: {len(self.apps)} apps  ·  {len(self.scope)} in scope"
         pbi = "Power BI: " + (self.pbi.get("tenant_id") and "configured" or "not configured")
         self.lbl_status.setText(
             f"Tenant:  {t}   •   Library:  {short(self.output_dir)}   •   {qlik}   •   {pbi}")
@@ -607,6 +642,7 @@ class MainWindow(QMainWindow):
             self.output_dir = (s.get("output_dir") or s.get("output_dir_qlik")
                                or s.get("output_dir_powerbi") or "")
             self.library_url = s.get("library_url", "")
+            self.scope = set(s.get("scope") or [])
             saved_pbi = s.get("pbi", {}) or {}
             for k in self.pbi:
                 if k in saved_pbi:
@@ -617,7 +653,8 @@ class MainWindow(QMainWindow):
     def _save_settings(self):
         try:
             data = {"tenant": self.tenant, "output_dir": self.output_dir,
-                    "library_url": self.library_url, "pbi": self.pbi}
+                    "library_url": self.library_url, "pbi": self.pbi,
+                    "scope": sorted(self.scope)}
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
         except Exception:

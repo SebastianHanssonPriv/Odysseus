@@ -96,8 +96,19 @@ re-enter them each session. Everything else is remembered in
 ---
 
 ## 3. Qlik workspace
-Click **Load apps**, tick the apps you want (picks stick across filtering), then
-open a task from the hub: **Extract metadata · Comparison analysis · Usage &
+Click **Load apps**, then **Change scope** to pick the apps you want. The scope
+is one global selection: every task reads the same one, it survives closing the
+app, and the bar at the top of the workspace always says what is in it. Apps
+that have since been deleted from the tenant drop out of the scope on the next
+load rather than lingering.
+
+In the picker, **Published only** and **Reloaded < 30 d** appear only when the
+tenant's Items API actually returned those fields; when it does not, they are
+switched off rather than silently matching nothing. **Cancel** leaves the scope
+exactly as it was, so you can open the picker to look around without losing a
+selection.
+
+Then open a task from the hub: **Extract metadata · Comparison analysis · Usage &
 leanness · Apply master items · Field lineage · Capacity report · Tenant QVD
 usage · Diagnose visibility**. One task fills the page at a time; **← All
 tasks** in the breadcrumb goes back to the hub. Hover a button or checkbox for

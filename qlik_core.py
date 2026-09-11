@@ -26,7 +26,10 @@ def normalize_host(tenant):
 
 def list_apps(tenant, api_key):
     """List all apps on the tenant via the Qlik Cloud REST items endpoint.
-    Returns a sorted list of dicts {name, guid, space_id}. Handles pagination."""
+    Returns a sorted list of dicts {name, guid, space_id, reloaded, published}.
+    Handles pagination. `reloaded` is an ISO timestamp or "" and `published` is
+    True or None - both are best-effort (see the comment below), so "" and None
+    mean "the tenant did not report it", not "never" or "no"."""
     host = normalize_host(tenant)
     url = f"https://{host}/api/v1/items?resourceType=app&limit=100"
     apps = []
@@ -38,10 +41,23 @@ def list_apps(tenant, api_key):
             guid = it.get("resourceId") or it.get("id")
             if not guid:
                 continue
+            # The Items payload carries more than name/space, and it costs
+            # nothing extra to keep. Qlik has moved these around between API
+            # versions and this codebase's author has not pinned them against
+            # every tenant, so each is read from the places it has been seen
+            # and left blank when absent - a caller must treat "" / None as
+            # "this tenant did not tell us", never as "no" (see
+            # scope_sheet.py, which hides a filter it has no data for).
+            attrs = it.get("resourceAttributes") or {}
+            meta = it.get("meta") or {}
             apps.append({
                 "name": it.get("name", "(unnamed)"),
                 "guid": guid,
                 "space_id": it.get("spaceId") or "",
+                "reloaded": (attrs.get("lastReloadTime") or it.get("updatedAt") or ""),
+                "published": (attrs.get("published") if "published" in attrs
+                              else (True if (attrs.get("publishTime")
+                                             or meta.get("isPublished")) else None)),
             })
         nxt = (data.get("links", {}) or {}).get("next") or {}
         url = nxt.get("href")

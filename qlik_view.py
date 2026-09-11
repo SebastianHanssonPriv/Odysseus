@@ -15,21 +15,21 @@ import time
 import datetime
 import threading
 
-from PySide6.QtCore import Qt, Signal, QSize, QEvent
-from PySide6.QtGui import QIcon, QColor, QBrush
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit,
-    QPushButton, QCheckBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractItemView, QPlainTextEdit, QFileDialog, QMessageBox,
-    QFrame, QScrollArea, QComboBox, QCompleter, QSplitter,
+    QPushButton, QCheckBox, QPlainTextEdit, QFileDialog, QMessageBox,
+    QScrollArea, QComboBox, QCompleter,
 )
 
 import qlik_core as core
 import qlik_capacity as qcap
 import reports
+from scope_sheet import ScopeBar
 from widgets import (
-    TEAL, BAD, WARN, GOOD, ROW_HOVER, TaskHub,
-    make_card, label, tip, ElidedLabel,
+    TEAL, BAD, WARN, GOOD, TaskHub,
+    make_card, label, tip,
     key_format_ok, scrub, friendly_load_error, human_bytes,
     MeterBar, kpi_row, ranked_bars, colored_table, clear_layout,
 )
@@ -58,11 +58,7 @@ class QlikView(QWidget):
     def __init__(self, shell):
         super().__init__()
         self.shell = shell
-        self.apps = []
-        self._selected = set()
         self._loaded_sig = None
-        self._building = False
-        self._hover_row = -1
         self._producer_map = None
         self._usage_app_results = None
         self._building_usage_combo = False
@@ -111,110 +107,15 @@ class QlikView(QWidget):
 
     # ---------------- layout ----------------
     def _build(self):
+        """A scope bar over the task area. The app table that used to sit here
+        permanently is now the scope sheet, opened on demand (REDESIGN_SPEC.md,
+        structural change 2), which gives every task page the whole workspace."""
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(10)
-        split = QSplitter(Qt.Vertical)
-        split.setHandleWidth(6)
-        split.setChildrenCollapsible(False)
-        sel = self._build_selection_card()
-        sel.setMinimumHeight(260)        # keep the app table + actions row from collapsing
-        tasks = self._build_task_area()
-        tasks.setMinimumHeight(220)
-        split.addWidget(sel)
-        split.addWidget(tasks)
-        split.setStretchFactor(0, 1)
-        split.setStretchFactor(1, 3)
-        split.setSizes([300, 620])
-        root.addWidget(split, 1)
-
-    def _search_box(self, placeholder, on_change):
-        f = QFrame()
-        f.setObjectName("search")
-        lay = QHBoxLayout(f)
-        lay.setContentsMargins(8, 0, 6, 0)
-        lay.setSpacing(2)
-        lay.addWidget(QLabel("\U0001F50D"))
-        ed = QLineEdit()
-        ed.setPlaceholderText(placeholder)
-        ed.textChanged.connect(on_change)
-        lay.addWidget(ed)
-        return f, ed
-
-    def _build_selection_card(self):
-        card = make_card()
-        grid = QGridLayout(card)
-        grid.setContentsMargins(14, 14, 14, 14)
-        grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(10)
-        grid.setColumnStretch(0, 3)
-        grid.setColumnStretch(1, 1)
-
-        left = QVBoxLayout()
-        left.setSpacing(8)
-        srow = QHBoxLayout()
-        srow.setSpacing(10)
-        appbox, self.ed_app = self._search_box("Find app", lambda _t: self._rebuild_table())
-        spbox, self.ed_space = self._search_box("Find space", lambda _t: self._rebuild_table())
-        srow.addWidget(appbox, 1)
-        srow.addWidget(spbox, 1)
-        self.btn_load = QPushButton("Load apps")
-        self.btn_load.setObjectName("ghost")
-        self.btn_load.clicked.connect(self._on_load_apps)
-        srow.addWidget(self.btn_load, 0)
-        left.addLayout(srow)
-
-        self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["Apps", "Space"])
-        self.table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setShowGrid(False)
-        self.table.setSelectionMode(QAbstractItemView.NoSelection)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table.setFocusPolicy(Qt.NoFocus)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.table.setMinimumHeight(180)
-        self.table.setMouseTracking(True)
-        self.table.cellClicked.connect(self._on_cell_clicked)
-        self.table.cellEntered.connect(self._on_cell_entered)
-        self.table.viewport().installEventFilter(self)
-        left.addWidget(self.table, 1)
-
-        actions = QHBoxLayout()
-        self.btn_all = QPushButton("Select all shown")
-        self.btn_all.setObjectName("accent")
-        self.btn_all.clicked.connect(self._select_all_shown)
-        actions.addWidget(self.btn_all)
-        actions.addStretch(1)
-        self.lbl_count = QLabel("0 selected")
-        self.lbl_count.setObjectName("muted")
-        actions.addWidget(self.lbl_count)
-        left.addLayout(actions)
-        grid.addLayout(left, 0, 0)
-
-        right = QVBoxLayout()
-        right.setSpacing(6)
-        head = QHBoxLayout()
-        head.addWidget(label("SELECTED APPS", "section"))
-        head.addStretch(1)
-        b_clear = QPushButton("Clear all")
-        b_clear.setObjectName("ghost")
-        b_clear.clicked.connect(self._clear_all)
-        head.addWidget(b_clear)
-        right.addLayout(head)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        holder = QFrame()
-        holder.setObjectName("card")
-        self.chip_layout = QVBoxLayout(holder)
-        self.chip_layout.setContentsMargins(8, 8, 8, 8)
-        self.chip_layout.setSpacing(6)
-        self.chip_layout.addStretch(1)
-        scroll.setWidget(holder)
-        right.addWidget(scroll, 1)
-        grid.addLayout(right, 0, 1)
-        return card
+        self.scope_bar = ScopeBar(self.shell, on_load=self._on_load_apps)
+        root.addWidget(self.scope_bar)
+        root.addWidget(self._build_task_area(), 1)
 
     def _build_task_area(self):
         """The Qlik tasks as a hub of cards plus one page per task, instead of
@@ -582,129 +483,6 @@ class QlikView(QWidget):
         for cb in self.checks.values():
             cb.setChecked(on)
 
-    # ---------------- table / selection ----------------
-    def _rebuild_table(self):
-        qa = self.ed_app.text().strip().lower()
-        qs = self.ed_space.text().strip().lower()
-        self._building = True
-        self._hover_row = -1
-        self.table.setRowCount(0)
-        for a in self.apps:
-            if qa and qa not in (a["name"] or "").lower():
-                continue
-            if qs and qs not in (a["space_name"] or "").lower():
-                continue
-            row = self.table.rowCount()
-            self.table.insertRow(row)
-            it = QTableWidgetItem(a["name"])
-            it.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
-            it.setCheckState(Qt.Checked if a["guid"] in self._selected else Qt.Unchecked)
-            it.setData(Qt.UserRole, a["guid"])
-            sp = QTableWidgetItem(a["space_name"])
-            sp.setFlags(Qt.ItemIsEnabled)
-            self.table.setItem(row, 0, it)
-            self.table.setItem(row, 1, sp)
-        self._building = False
-        self._update_count()
-
-    def _on_cell_clicked(self, row, _col):
-        it = self.table.item(row, 0)
-        if not it:
-            return
-        guid = it.data(Qt.UserRole)
-        self._set_selected(guid, guid not in self._selected)
-
-    def _on_cell_entered(self, row, _col):
-        if row == self._hover_row:
-            return
-        self._set_row_bg(self._hover_row, None)
-        self._set_row_bg(row, QColor(ROW_HOVER))
-        self._hover_row = row
-
-    def _set_row_bg(self, row, color):
-        if row < 0 or row >= self.table.rowCount():
-            return
-        brush = QBrush(color) if color is not None else QBrush()
-        for c in range(self.table.columnCount()):
-            it = self.table.item(row, c)
-            if it:
-                it.setBackground(brush)
-
-    def eventFilter(self, obj, event):
-        if obj is self.table.viewport() and event.type() == QEvent.Leave:
-            self._set_row_bg(self._hover_row, None)
-            self._hover_row = -1
-        return super().eventFilter(obj, event)
-
-    def _set_selected(self, guid, on):
-        if on:
-            self._selected.add(guid)
-        else:
-            self._selected.discard(guid)
-        self._building = True
-        for row in range(self.table.rowCount()):
-            it = self.table.item(row, 0)
-            if it and it.data(Qt.UserRole) == guid:
-                it.setCheckState(Qt.Checked if on else Qt.Unchecked)
-                break
-        self._building = False
-        self._rebuild_chips()
-        self._update_count()
-
-    def _select_all_shown(self):
-        self._building = True
-        for row in range(self.table.rowCount()):
-            it = self.table.item(row, 0)
-            it.setCheckState(Qt.Checked)
-            self._selected.add(it.data(Qt.UserRole))
-        self._building = False
-        self._rebuild_chips()
-        self._update_count()
-
-    def _clear_all(self):
-        self._selected.clear()
-        self._building = True
-        for row in range(self.table.rowCount()):
-            self.table.item(row, 0).setCheckState(Qt.Unchecked)
-        self._building = False
-        self._rebuild_chips()
-        self._update_count()
-
-    def _make_chip(self, name, guid):
-        chip = QFrame()
-        chip.setObjectName("chip")
-        lay = QHBoxLayout(chip)
-        lay.setContentsMargins(10, 4, 6, 4)
-        lay.setSpacing(6)
-        lay.addWidget(ElidedLabel(name), 1)
-        x = QPushButton("✕")
-        x.setObjectName("chipx")
-        x.setFixedSize(QSize(18, 18))
-        x.setCursor(Qt.PointingHandCursor)
-        x.clicked.connect(lambda: self._set_selected(guid, False))
-        lay.addWidget(x, 0)
-        return chip
-
-    def _rebuild_chips(self):
-        while self.chip_layout.count():
-            item = self.chip_layout.takeAt(0)
-            w = item.widget()
-            if w:
-                w.deleteLater()
-        by = {a["guid"]: a for a in self.apps}
-        for g in sorted(self._selected, key=lambda x: (by.get(x, {}).get("name", "") or "").lower()):
-            a = by.get(g)
-            if a:
-                self.chip_layout.addWidget(self._make_chip(a["name"], g))
-        self.chip_layout.addStretch(1)
-
-    def _update_count(self):
-        self.lbl_count.setText(f"{len(self._selected)} selected")
-
-    def _selected_targets(self):
-        by = {a["guid"]: a for a in self.apps}
-        return [by[g] for g in self._selected if g in by]
-
     # ---------------- shared checks ----------------
     def _need_settings(self):
         if not self.tenant or not self.api_key.strip():
@@ -723,14 +501,14 @@ class QlikView(QWidget):
         """Called by the shell when settings change: reload apps if creds are set."""
         if self.tenant and self.api_key.strip():
             sig = (self.tenant, self.api_key)
-            if not self.apps or sig != self._loaded_sig:
+            if not self.shell.apps or sig != self._loaded_sig:
                 self._on_load_apps()
 
     # ---------------- load apps ----------------
     def _on_load_apps(self):
         if self._need_settings():
             return
-        self.btn_load.setEnabled(False)
+        self.scope_bar.btn_load.setEnabled(False)
         self.shell.busy_begin("Loading apps")
         self.log("Loading spaces and apps ...")
         threading.Thread(target=self._load_worker,
@@ -753,16 +531,12 @@ class QlikView(QWidget):
             self.sig_done.emit("load")
 
     def _populate(self, apps):
-        self.apps = apps
         self._loaded_sig = (self.tenant, self.api_key)
-        self._selected.clear()
-        self.ed_app.clear()
-        self.ed_space.clear()
-        self._rebuild_table()
-        self._rebuild_chips()
+        self.shell.set_apps(apps)
         spaces = len({a["space_name"] for a in apps})
-        self.log(f"Loaded {len(apps)} apps across {spaces} spaces.")
-        self.shell.refresh_status()
+        kept = len(self.shell.scope)
+        tail = f"  {kept} of them still in scope." if kept else ""
+        self.log(f"Loaded {len(apps)} apps across {spaces} spaces.{tail}")
 
     def _on_load_failed(self, msg):
         self.log(f"Could not load apps: {msg}")
@@ -771,7 +545,7 @@ class QlikView(QWidget):
     def _on_worker_done(self, which):
         self.shell.busy_end()
         if which == "load":
-            self.btn_load.setEnabled(bool(self.tenant and self.api_key.strip()))
+            self.scope_bar.btn_load.setEnabled(bool(self.tenant and self.api_key.strip()))
             self.shell.refresh_status()
         elif which == "run":
             self.btn_run.setEnabled(True)
@@ -806,7 +580,7 @@ class QlikView(QWidget):
         if not any(cb.isChecked() for cb in self.checks.values()):
             QMessageBox.warning(self, "Nothing selected", "Tick at least one export.")
             return
-        targets = self._selected_targets()
+        targets = self.shell.scope_targets()
         if not targets:
             QMessageBox.warning(self, "Select apps", "Select one or more apps in the list to export.")
             return
@@ -854,7 +628,7 @@ class QlikView(QWidget):
         if not self.output_dir:
             QMessageBox.warning(self, "Missing settings", "Set an output folder in Settings.")
             return
-        targets = self._selected_targets()
+        targets = self.shell.scope_targets()
         if len(targets) < 2:
             QMessageBox.warning(self, "Select apps", "Select at least 2 apps in the list to compare.")
             return
@@ -937,7 +711,7 @@ class QlikView(QWidget):
         if not self.output_dir:
             QMessageBox.warning(self, "Missing settings", "Set an output folder in Settings.")
             return
-        targets = self._selected_targets()
+        targets = self.shell.scope_targets()
         if not targets:
             QMessageBox.warning(self, "Select apps", "Select one or more apps in the list to analyze.")
             return
@@ -1321,7 +1095,7 @@ class QlikView(QWidget):
         if not self.output_dir:
             QMessageBox.warning(self, "Missing settings", "Set an output folder in Settings (used for backups).")
             return
-        targets = self._selected_targets()
+        targets = self.shell.scope_targets()
         if not targets:
             QMessageBox.warning(self, "Select apps", "Select one or more apps in the list to apply to.")
             return
@@ -1414,7 +1188,7 @@ class QlikView(QWidget):
         if not self.output_dir:
             QMessageBox.warning(self, "Missing settings", "Set an output folder in Settings.")
             return
-        targets = self._selected_targets()
+        targets = self.shell.scope_targets()
         if not targets:
             QMessageBox.warning(self, "Select apps", "Select one or more apps in the list to scan.")
             return
@@ -1652,10 +1426,10 @@ class QlikView(QWidget):
             self.log(f"Lineage HTML -> {os.path.basename(html_path)}")
 
     def _single_target(self):
-        targets = self._selected_targets()
+        targets = self.shell.scope_targets()
         if len(targets) != 1:
             QMessageBox.warning(self, "Select one app",
-                                "Select exactly one app in the list above for lineage.")
+                                "Change the scope to exactly one app to trace a field.")
             return None
         return targets[0]
 
@@ -1825,15 +1599,15 @@ class QlikView(QWidget):
     def _on_build_index(self):
         if self._need_settings():
             return
-        if not self.apps:
+        if not self.shell.apps:
             QMessageBox.warning(self, "Load apps", "Load apps first - the index scans the loaded apps.")
             return
         self.btn_index.setEnabled(False)
         self.shell.busy_begin("Building cross-app index")
-        self.log(f"Building cross-app lineage index over {len(self.apps)} loaded app(s) - "
+        self.log(f"Building cross-app lineage index over {len(self.shell.apps)} loaded app(s) - "
                  "this can take a while ...")
         threading.Thread(target=self._index_worker,
-                         args=(self.tenant, self.api_key, list(self.apps)), daemon=True).start()
+                         args=(self.tenant, self.api_key, list(self.shell.apps)), daemon=True).start()
 
     def _index_worker(self, tenant, key, apps):
         index = []
