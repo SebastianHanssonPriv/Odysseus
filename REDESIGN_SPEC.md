@@ -218,6 +218,8 @@ here is gone for everyone.
       Schedules and Appearance; neither exists, because scheduling is Windows
       Task Scheduler (nothing for Studio to configure) and there is no theme
       to switch.
-- [~] Breakpoints: rail width and both hubs' column counts react to window
-      width. The `< 1040` rule is written but still not reachable; see the
-      measured minimum window width below.
+- [x] Breakpoints: rail width (184 / 220 at 1440) and both hubs' column counts
+      (2 / 3 at 1040) react to window width, and the content column is capped
+      at 1600 and centred. The measured minimum window width is 992px, so the
+      `< 1040` rule is reachable. Not done: the icons-only 56px rail below
+      1040, which needs icon assets, and the third 380px column at 1700+.
