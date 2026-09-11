@@ -24,7 +24,8 @@ from PySide6.QtGui import (
     QColor, QPainter, QBrush, QPen, QPixmap, QFont, QFontDatabase,
 )
 from PySide6.QtWidgets import (
-    QWidget, QFrame, QLabel, QVBoxLayout, QHBoxLayout,
+    QWidget, QFrame, QLabel, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QPushButton, QScrollArea, QStackedWidget,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QSizePolicy,
 )
 
@@ -466,6 +467,133 @@ class Banner(QFrame):
         body.setWordWrap(True)
         body.setStyleSheet(f"background: transparent; color: {ink}; border: none;")
         lay.addWidget(body, 1)
+
+
+# ------------------------------------------------------------------- task router
+class TaskHub(QWidget):
+    """A workspace as a hub of task cards plus one page per task.
+
+    Replaces a tab strip (REDESIGN_SPEC.md, structural change 1): the hub is
+    the landing page, opening a task swaps in its page, and a breadcrumb with a
+    back arrow gets you out. Build the pages however you like, register each
+    one with `add`, call `finish` once, then `open(-1)` shows the hub.
+
+    Every page sits behind a scroll area. Without one, a page taller than the
+    pane it lives in gets squeezed below its minimum and Qt draws its widgets
+    on top of each other.
+    """
+
+    COLS_MAX = 3
+
+    def __init__(self, crumb_root):
+        super().__init__()
+        self._root = crumb_root
+        self._tasks = []          # (title, desc, badge)
+        self._cards = []
+        self._cols = 0
+        self.stack = QStackedWidget()
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        lay.addWidget(self._build_crumb())
+        lay.addWidget(self.stack, 1)
+
+    # ---- building ----
+    def add(self, page, title, desc, badge=""):
+        self._tasks.append((title, desc, badge))
+        self.stack.addWidget(_in_scroll(page, no_hscroll=True))
+
+    def finish(self):
+        """Build the hub and put it at stack index 0, so a task's index is its
+        stack index minus one."""
+        inner = QWidget()
+        self._grid = QGridLayout(inner)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setHorizontalSpacing(10)
+        self._grid.setVerticalSpacing(10)
+        self._cards = [self._task_card(i, t, d, b)
+                       for i, (t, d, b) in enumerate(self._tasks)]
+        self.set_columns(self.COLS_MAX)
+        self.stack.insertWidget(0, _in_scroll(inner))
+        self.open(-1)
+
+    # ---- navigation ----
+    def open(self, idx):
+        """idx -1 is the hub; 0..n-1 are the task pages."""
+        self.stack.setCurrentIndex(idx + 1)
+        on_task = idx >= 0
+        self.btn_back.setVisible(on_task)
+        self.lbl_crumb.setText(self._root + "  /  " +
+                               (self._tasks[idx][0] if on_task else "Tasks"))
+
+    def set_columns(self, cols):
+        """Reflow the hub. Driven by MainWindow.resizeEvent."""
+        cols = max(1, min(cols, self.COLS_MAX))
+        if cols == self._cols or not self._cards:
+            return
+        self._cols = cols
+        for i, card in enumerate(self._cards):
+            self._grid.removeWidget(card)
+            self._grid.addWidget(card, i // cols, i % cols)
+        for c in range(self.COLS_MAX):
+            self._grid.setColumnStretch(c, 1 if c < cols else 0)
+        self._grid.setRowStretch(self._grid.rowCount(), 1)
+
+    # ---- pieces ----
+    def _task_card(self, idx, title, desc, badge):
+        card = make_card(blueprint=True)
+        card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(16, 14, 16, 12)
+        lay.setSpacing(6)
+        head = QHBoxLayout()
+        t = QLabel(title)
+        t.setStyleSheet(f"font-family: {FONT_HEAD}; font-size: 13pt; font-weight: 600; "
+                        "background: transparent; border: none;")
+        head.addWidget(t)
+        head.addStretch(1)
+        if badge:
+            head.addWidget(Tag(badge, "bad" if badge == "writes" else "neutral"))
+        lay.addLayout(head)
+        lay.addWidget(label(desc, "muted", wrap=True), 1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        b = QPushButton("OPEN  \u2192")
+        b.setObjectName("ghost")
+        b.clicked.connect(lambda _c=False, i=idx: self.open(i))
+        row.addWidget(b)
+        lay.addLayout(row)
+        return card
+
+    def _build_crumb(self):
+        bar = QFrame()
+        # Same fill as the sticky action bar, but the rule sits under it rather
+        # than over it, because this one heads the page.
+        bar.setStyleSheet(f"background: {BAR}; border: none; "
+                          f"border-bottom: 1px solid {LINE};")
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(10, 5, 10, 5)
+        lay.setSpacing(10)
+        self.btn_back = QPushButton("\u2190  All tasks")
+        self.btn_back.setObjectName("ghost")
+        self.btn_back.clicked.connect(lambda: self.open(-1))
+        lay.addWidget(self.btn_back)
+        self.lbl_crumb = QLabel("")
+        self.lbl_crumb.setStyleSheet(f"font-family: {FONT_HEAD}; font-size: 12pt; "
+                                     "font-weight: 600; background: transparent;")
+        lay.addWidget(self.lbl_crumb)
+        lay.addStretch(1)
+        return bar
+
+
+def _in_scroll(widget, no_hscroll=False):
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QFrame.NoFrame)
+    if no_hscroll:
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    scroll.setWidget(widget)
+    return scroll
 
 
 # ------------------------------------------------------------------- chart helper

@@ -18,18 +18,18 @@ from PySide6.QtCore import Qt, Signal, QSize, QEvent
 from PySide6.QtGui import QIcon, QColor, QBrush
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit,
-    QPushButton, QCheckBox, QStackedWidget, QTableWidget, QTableWidgetItem,
+    QPushButton, QCheckBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QAbstractItemView, QPlainTextEdit, QFileDialog, QMessageBox,
-    QFrame, QScrollArea, QComboBox, QCompleter, QSplitter, QSizePolicy,
+    QFrame, QScrollArea, QComboBox, QCompleter, QSplitter,
 )
 
 import qlik_core as core
 import qlik_capacity as qcap
 from widgets import (
-    TEAL, BAD, WARN, GOOD, MUTED, ROW_HOVER, FONT_HEAD, BAR, LINE, Tag,
+    TEAL, BAD, WARN, GOOD, ROW_HOVER, TaskHub,
     make_card, label, tip, ElidedLabel,
     key_format_ok, scrub, friendly_load_error, human_bytes,
-    KpiCard, MeterBar, kpi_row, ranked_bars, colored_table, clear_layout,
+    MeterBar, kpi_row, ranked_bars, colored_table, clear_layout,
 )
 
 # light row tints for the colour-coded action list
@@ -92,14 +92,11 @@ class QlikView(QWidget):
 
     @property
     def output_dir(self):
-        return self.shell.output_dir_qlik
+        return self.shell.output_dir
 
     def _feature_dir(self, name):
-        """This feature's own subfolder under the Qlik output root (created
-        on demand by whichever write_*/QlikExporter call uses it) -- keeps
-        every export/report type physically separated instead of all of
-        them piling into one shared folder."""
-        return os.path.join(self.output_dir or os.path.expanduser("~"), name)
+        """This feature's own subfolder inside the library: <library>/Qlik/<name>."""
+        return self.shell.feature_dir("Qlik", name)
 
     def log(self, msg):
         self.shell.log(msg)
@@ -219,8 +216,7 @@ class QlikView(QWidget):
         QTabWidget - only the final `addTab` became `_add_task`, which puts a
         card on the hub and the page in the stack. No worker, signal or handler
         moved, so the threading model is untouched."""
-        self._tasks = []
-        self.task_stack = QStackedWidget()
+        self.hub = TaskHub("Qlik Cloud")
 
         # Extract
         tab_x = QWidget()
@@ -259,7 +255,7 @@ class QlikView(QWidget):
         brow.addStretch(1)
         xl.addLayout(brow)
         xl.addStretch(1)
-        self._add_task(tab_x, "Extract metadata", "Measures, dimensions, variables, load script and visuals for each app in scope.")
+        self.hub.add(tab_x, "Extract metadata", "Measures, dimensions, variables, load script and visuals for each app in scope.")
 
         # Comparison
         tab_c = QWidget()
@@ -287,7 +283,7 @@ class QlikView(QWidget):
         self.cons_dash.addStretch(1)
         cons_scroll.setWidget(cons_holder)
         cl.addWidget(cons_scroll, 1)
-        self._add_task(tab_c, "Comparison analysis", "Name conflicts and redundancy in measures and dimensions across 2+ apps.")
+        self.hub.add(tab_c, "Comparison analysis", "Name conflicts and redundancy in measures and dimensions across 2+ apps.")
 
         # Usage
         tab_u = QWidget()
@@ -333,7 +329,7 @@ class QlikView(QWidget):
         self.usage_dash_q.addStretch(1)
         u_scroll.setWidget(u_holder)
         ul.addWidget(u_scroll, 1)
-        self._add_task(tab_u, "Usage & leanness", "What is not used: master items, model fields, tables and variables.")
+        self.hub.add(tab_u, "Usage & leanness", "What is not used: master items, model fields, tables and variables.")
 
         # Apply (WRITE)
         tab_a = QWidget()
@@ -386,7 +382,7 @@ class QlikView(QWidget):
         arow.addStretch(1)
         al.addLayout(arow)
         al.addStretch(1)
-        self._add_task(tab_a, "Apply master items", "Create, update or delete measures and dimensions from a CSV. Dry run first.", "writes")
+        self.hub.add(tab_a, "Apply master items", "Create, update or delete measures and dimensions from a CSV. Dry run first.", "writes")
 
         # Field lineage
         tab_l = QWidget()
@@ -455,7 +451,7 @@ class QlikView(QWidget):
         self.lineage_panel.setReadOnly(True)
         self.lineage_panel.setMinimumHeight(150)
         ll.addWidget(self.lineage_panel, 1)
-        self._add_task(tab_l, "Field lineage", "Which QVDs an app reads, and the pipeline a single field took into it.")
+        self.hub.add(tab_l, "Field lineage", "Which QVDs an app reads, and the pipeline a single field took into it.")
 
         # Capacity (controls + dashboard)
         tab_cap = QWidget()
@@ -492,7 +488,7 @@ class QlikView(QWidget):
         self.cap_dash.addStretch(1)
         cap_scroll.setWidget(cap_holder)
         capl.addWidget(cap_scroll, 1)
-        self._add_task(tab_cap, "Capacity report", "Every app's data-model size and every imported dataset, ranked by saving.", "tenant-wide")
+        self.hub.add(tab_cap, "Capacity report", "Every app's data-model size and every imported dataset, ranked by saving.", "tenant-wide")
 
         # Tenant QVD & field usage (published apps only)
         tab_t = QWidget()
@@ -524,7 +520,7 @@ class QlikView(QWidget):
         self.tenant_usage_panel.setReadOnly(True)
         self.tenant_usage_panel.setMinimumHeight(150)
         tl.addWidget(self.tenant_usage_panel, 1)
-        self._add_task(tab_t, "Tenant QVD usage", "Published apps walked back "
+        self.hub.add(tab_t, "Tenant QVD usage", "Published apps walked back "
                        "through every upstream app that feeds them.", "tenant-wide")
 
         # Diagnose visibility is its own task: it is troubleshooting, not part
@@ -568,122 +564,11 @@ class QlikView(QWidget):
         self.diag_visibility_panel.setReadOnly(True)
         self.diag_visibility_panel.setMinimumHeight(120)
         dl.addWidget(self.diag_visibility_panel, 1)
-        self._add_task(tab_d, "Diagnose visibility", "Test whether a specific "
+        self.hub.add(tab_d, "Diagnose visibility", "Test whether a specific "
                        "app GUID is reachable with the current key.", "advanced")
 
-        self.task_stack.insertWidget(0, self._build_hub())
-        wrap = QWidget()
-        wl = QVBoxLayout(wrap)
-        wl.setContentsMargins(0, 0, 0, 0)
-        wl.setSpacing(8)
-        wl.addWidget(self._build_crumb())
-        wl.addWidget(self.task_stack, 1)
-        self._open_task(-1)
-        return wrap
-
-    # ---------------- task hub plumbing ----------------
-    def _add_task(self, page, title, desc, badge=""):
-        """Register a built page as a task: a card on the hub, a page in the
-        stack. Stack index is the task index + 1, because the hub is inserted
-        at 0 once every task is known.
-
-        The page goes in behind a scroll area. Without one, a page taller than
-        the splitter's bottom pane gets squeezed below its minimum and Qt
-        draws its widgets on top of each other."""
-        self._tasks.append((title, desc, badge))
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setWidget(page)
-        self.task_stack.addWidget(scroll)
-
-    def _build_hub(self):
-        """The landing page of the Qlik workspace: one card per task, three
-        to a row."""
-        inner = QWidget()
-        self._hub_grid = QGridLayout(inner)
-        self._hub_grid.setContentsMargins(0, 0, 0, 0)
-        self._hub_grid.setHorizontalSpacing(10)
-        self._hub_grid.setVerticalSpacing(10)
-        self._hub_cards = [self._task_card(i, t, d, b)
-                           for i, (t, d, b) in enumerate(self._tasks)]
-        self._hub_cols = 0
-        self.set_hub_columns(self.HUB_COLS_MAX)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setWidget(inner)
-        return scroll
-
-    def _task_card(self, idx, title, desc, badge):
-        card = make_card(blueprint=True)
-        card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
-        lay = QVBoxLayout(card)
-        lay.setContentsMargins(16, 14, 16, 12)
-        lay.setSpacing(6)
-        head = QHBoxLayout()
-        t = QLabel(title)
-        t.setStyleSheet(f"font-family: {FONT_HEAD}; font-size: 13pt; font-weight: 600; "
-                        "background: transparent; border: none;")
-        head.addWidget(t)
-        head.addStretch(1)
-        if badge:
-            head.addWidget(Tag(badge, "bad" if badge == "writes" else "neutral"))
-        lay.addLayout(head)
-        lay.addWidget(label(desc, "muted", wrap=True), 1)
-        row = QHBoxLayout()
-        row.addStretch(1)
-        b = QPushButton("OPEN  \u2192")
-        b.setObjectName("ghost")
-        b.clicked.connect(lambda _c=False, i=idx: self._open_task(i))
-        row.addWidget(b)
-        lay.addLayout(row)
-        return card
-
-    def _build_crumb(self):
-        bar = QFrame()
-        # Same fill as the sticky action bar, but the rule sits under it
-        # rather than over it, because this one heads the page.
-        bar.setStyleSheet(f"background: {BAR}; border: none; "
-                          f"border-bottom: 1px solid {LINE};")
-        lay = QHBoxLayout(bar)
-        lay.setContentsMargins(10, 5, 10, 5)
-        lay.setSpacing(10)
-        self.btn_task_back = QPushButton("\u2190  All tasks")
-        self.btn_task_back.setObjectName("ghost")
-        self.btn_task_back.clicked.connect(lambda: self._open_task(-1))
-        lay.addWidget(self.btn_task_back)
-        self.lbl_crumb = QLabel("")
-        self.lbl_crumb.setStyleSheet(f"font-family: {FONT_HEAD}; font-size: 12pt; "
-                                     "font-weight: 600; background: transparent;")
-        lay.addWidget(self.lbl_crumb)
-        lay.addStretch(1)
-        return bar
-
-    HUB_COLS_MAX = 3
-
-    def set_hub_columns(self, cols):
-        """Reflow the hub to `cols` columns. Driven by MainWindow.resizeEvent
-        (REDESIGN_SPEC.md, 'Breakpoints')."""
-        cols = max(1, min(cols, self.HUB_COLS_MAX))
-        if cols == self._hub_cols:
-            return
-        self._hub_cols = cols
-        for i, card in enumerate(self._hub_cards):
-            self._hub_grid.removeWidget(card)
-            self._hub_grid.addWidget(card, i // cols, i % cols)
-        for c in range(self.HUB_COLS_MAX):
-            self._hub_grid.setColumnStretch(c, 1 if c < cols else 0)
-        self._hub_grid.setRowStretch(self._hub_grid.rowCount(), 1)
-
-    def _open_task(self, idx):
-        """idx -1 is the hub; 0..n-1 are the task pages."""
-        self.task_stack.setCurrentIndex(idx + 1)
-        on_task = idx >= 0
-        self.btn_task_back.setVisible(on_task)
-        self.lbl_crumb.setText("Qlik Cloud  /  " +
-                               (self._tasks[idx][0] if on_task else "Tasks"))
+        self.hub.finish()
+        return self.hub
 
     def _set_all_exports(self, on):
         for cb in self.checks.values():

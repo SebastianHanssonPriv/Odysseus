@@ -74,17 +74,38 @@ not stretch tables.
 - Scheduling assumes Windows Task Scheduler, which `HOW_TO_RUN.md` already
   documents for Power BI collection.
 
+## One library folder
+
+Settings has a single **Library folder**. Everything both products write goes
+under it, each feature in its own subfolder:
+
+```
+<library>/
+  Qlik/<feature>/          metadata_export, capacity_report, field_lineage, ...
+  powerbi_data/<feature>/  activity_events, raw, analytics, model_lineage
+```
+
+`powerbi_data` deliberately keeps its original name and its place at the library
+root rather than moving under a `Power BI/` folder: `collect_daily.bat` and
+`.env` point `OUTPUT_DIR` at `<library>\powerbi_data`, so renaming it would
+break the scheduled daily collection and orphan the accumulated event history.
+
+Point the library at a synced OneDrive or SharePoint path and it doubles as the
+shared library of the settled decisions above. The per-product `output_dir_qlik`
+and `output_dir_powerbi` settings are gone; `_load_settings` migrates from
+either one.
+
 ## Status
 
 - [x] Tokens, QSS and widget set
-- [x] 1. Router: Qlik task hub + one page per task, with a back arrow
+- [x] 1. Router: both workspaces are a task hub plus one page per task, with a
+      back arrow. `widgets.TaskHub` is the shared implementation.
 - [ ] 2. Shared scope object + scope sheet
 - [ ] 3. Report records (manifest, library, viewer)
 - [~] 4. Log drawer: the panel is collapsed by default. Named run steps still
       to do.
 - [ ] 5. Sticky action bar
 - [ ] 6. Settings as a rail page
-- [~] Breakpoints: rail width and hub columns react to window width. The
-      `< 1040` rule is written but unreachable, because `powerbi_view.py` still
-      forces a 1075px minimum window width; it becomes live once that view is
-      split the way `qlik_view.py` now is.
+- [~] Breakpoints: rail width and both hubs' column counts react to window
+      width. The `< 1040` rule is written but still not reachable; see the
+      measured minimum window width below.

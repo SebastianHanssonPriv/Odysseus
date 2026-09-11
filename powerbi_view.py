@@ -22,12 +22,12 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Signal, QDate
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox, QComboBox,
-    QTabWidget, QDateEdit, QScrollArea, QMessageBox, QPlainTextEdit,
+    QDateEdit, QScrollArea, QMessageBox, QPlainTextEdit,
 )
 
 from config import Settings
 from widgets import (
-    TEAL, WARN, GOOD, BAD, make_card, label, tip, kpi_row, line_chart, ranked_bars,
+    TEAL, WARN, GOOD, BAD, TaskHub, make_card, label, tip, kpi_row, line_chart, ranked_bars,
     colored_table, clear_layout,
 )
 
@@ -56,11 +56,15 @@ class PowerBIView(QWidget):
         self.shell.log(msg)
 
     def _data_dir(self) -> Path | None:
-        if not self.shell.output_dir_powerbi:
+        if not self.shell.output_dir:
             QMessageBox.warning(self, "Missing settings",
-                                "Set a Power BI output folder in Settings - Power BI data lands under it.")
+                                "Set a library folder in Settings - Power BI data lands under it.")
             return None
-        return Path(self.shell.output_dir_powerbi) / "powerbi_data"
+        # Deliberately NOT moved under a "Power BI" subfolder like the Qlik
+        # features: collect_daily.bat and .env point OUTPUT_DIR at
+        # <library>\powerbi_data, so renaming it would break the scheduled
+        # daily collection and orphan the accumulated event history.
+        return Path(self.shell.output_dir) / "powerbi_data"
 
     def _pbi_settings(self, data_dir: Path) -> Settings:
         """Build a config.Settings from the shell's Power BI settings (raises
@@ -99,7 +103,7 @@ class PowerBIView(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(10)
-        tabs = QTabWidget()
+        self.hub = TaskHub("Power BI")
 
         # Collect
         tab_c = QWidget()
@@ -152,7 +156,7 @@ class PowerBIView(QWidget):
         crow.addStretch(1)
         cl.addLayout(crow)
         cl.addStretch(1)
-        tabs.addTab(tab_c, "Collect")
+        self.hub.add(tab_c, "Collect activity events", "Microsoft keeps about 28 days. Collect regularly and they accumulate into a dataset that outlives the window.")
 
         # Raw export
         tab_r = QWidget()
@@ -182,7 +186,7 @@ class PowerBIView(QWidget):
         rrow.addStretch(1)
         rl.addLayout(rrow)
         rl.addStretch(1)
-        tabs.addTab(tab_r, "Raw export")
+        self.hub.add(tab_r, "Raw export", "Every collected event, flattened into a lossless table plus a key map.")
 
         # Usage analytics + dashboard
         tab_a = QWidget()
@@ -238,7 +242,7 @@ class PowerBIView(QWidget):
         self.usage_dash.addStretch(1)
         a_scroll.setWidget(holder)
         al.addWidget(a_scroll, 1)
-        tabs.addTab(tab_a, "Usage analytics")
+        self.hub.add(tab_a, "Usage analytics", "Exact recorded views per report, workspace and user, sliceable by time window.")
 
         # Model lineage
         tab_m = QWidget()
@@ -277,9 +281,11 @@ class PowerBIView(QWidget):
         self.lineage_panel.setReadOnly(True)
         self.lineage_panel.setMinimumHeight(150)
         ml.addWidget(self.lineage_panel, 1)
-        tabs.addTab(tab_m, "Model lineage")
+        self.hub.add(tab_m, "Model lineage", "Semantic model table to warehouse source, direct "
+                     "or through a Gen1 dataflow.", "tenant-wide")
 
-        root.addWidget(tabs, 1)
+        self.hub.finish()
+        root.addWidget(self.hub, 1)
 
     # ================= collect =================
     def _on_catchup(self):

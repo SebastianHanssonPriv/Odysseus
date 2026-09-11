@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 
 from widgets import (
     STYLE, TEAL, TEAL_DARK, RAIL, RAIL_FG, FONT_HEAD,
-    make_card, label, load_fonts, app_font,
+    make_card, label, tip, load_fonts, app_font,
 )
 from qlik_view import QlikView
 from powerbi_view import PowerBIView
@@ -117,28 +117,28 @@ class SettingsDialog(QDialog):
         pg.setColumnStretch(1, 1)
         lay.addLayout(pg)
 
-        # --- output folders (one per product, so exports never mix) ---
-        lay.addWidget(self._sec("OUTPUT FOLDERS"))
+        # --- one library folder for everything both products write ---
+        lay.addWidget(self._sec("LIBRARY FOLDER"))
         og = QGridLayout()
-        og.addWidget(self._mut("Qlik output folder"), 0, 0)
-        self.ed_out_qlik = QLineEdit(parent.output_dir_qlik)
-        og.addWidget(self.ed_out_qlik, 0, 1)
-        browse_q = QPushButton("Browse...")
-        browse_q.setObjectName("ghost")
-        browse_q.clicked.connect(lambda: self._browse(self.ed_out_qlik))
-        og.addWidget(browse_q, 0, 2)
-        og.addWidget(self._mut("Power BI output folder"), 1, 0)
-        self.ed_out_pbi = QLineEdit(parent.output_dir_powerbi)
-        og.addWidget(self.ed_out_pbi, 1, 1)
-        browse_p = QPushButton("Browse...")
-        browse_p.setObjectName("ghost")
-        browse_p.clicked.connect(lambda: self._browse(self.ed_out_pbi))
-        og.addWidget(browse_p, 1, 2)
+        og.addWidget(self._mut("Library folder"), 0, 0)
+        self.ed_library = QLineEdit(parent.output_dir)
+        self.ed_library.setPlaceholderText(r"e.g. C:\Users\you\Bufab\BI Governance - Library")
+        tip(self.ed_library, "Point this at a folder that OneDrive or the SharePoint client syncs "
+                             "and the library is shared: everyone with access to that library sees "
+                             "every report, opens the workbooks in Excel or the browser, and needs "
+                             "no copy of Studio.\n\nA plain local folder works too - it is then "
+                             "just your own library.")
+        og.addWidget(self.ed_library, 0, 1)
+        browse = QPushButton("Browse...")
+        browse.setObjectName("ghost")
+        browse.clicked.connect(lambda: self._browse(self.ed_library))
+        og.addWidget(browse, 0, 2)
         og.setColumnStretch(1, 1)
         lay.addLayout(og)
-        note_out = self._mut("Each feature within a product writes to its own subfolder under that "
-                             "product's output folder (e.g. capacity_report, field_lineage, "
-                             "tenant_usage) - nothing lands loose in one shared folder.")
+        note_out = self._mut("Everything both products write goes here, each feature in its own "
+                             "subfolder: Qlik\\capacity_report, Qlik\\field_lineage, "
+                             "powerbi_data\\analytics and so on. Put the folder on a synced "
+                             "SharePoint or OneDrive path and it doubles as the shared library.")
         note_out.setWordWrap(True)
         note_out.setStyleSheet("font-size: 8pt;")
         lay.addWidget(note_out)
@@ -179,7 +179,7 @@ class SettingsDialog(QDialog):
         self.ed_p_kvsecret.setEnabled(vault_mode)
 
     def _browse(self, lineedit):
-        d = QFileDialog.getExistingDirectory(self, "Choose output folder",
+        d = QFileDialog.getExistingDirectory(self, "Choose the library folder",
                                              lineedit.text() or os.path.expanduser("~"))
         if d:
             lineedit.setText(d)
@@ -194,8 +194,7 @@ class SettingsDialog(QDialog):
         }
         self._main.apply_settings(
             self.ed_q_tenant.text().strip(), self.ed_q_key.text(),
-            self.ed_out_qlik.text().strip(), self.ed_out_pbi.text().strip(),
-            pbi, self.ed_p_secret.text())
+            self.ed_library.text().strip(), pbi, self.ed_p_secret.text())
         self.accept()
 
 
@@ -216,8 +215,7 @@ class MainWindow(QMainWindow):
         # shared state
         self.tenant = ""
         self.api_key = ""            # in memory only
-        self.output_dir_qlik = ""
-        self.output_dir_powerbi = ""
+        self.output_dir = ""         # the library: one root for everything written
         self.pbi = {"tenant_id": "", "client_id": "", "auth_mode": PBI_AUTH_MODES[0],
                     "key_vault_url": "", "key_vault_secret_name": ""}
         self.pbi_secret = ""         # in memory only
@@ -377,7 +375,7 @@ class MainWindow(QMainWindow):
         b_clear = QPushButton("Clear log")
         b_clear.setObjectName("ghost")
         b_clear.clicked.connect(lambda: self.log_box.setPlainText(""))
-        b_open = QPushButton("Open output folder")
+        b_open = QPushButton("Open library")
         b_open.setObjectName("ghost")
         b_open.clicked.connect(self._open_folder)
         head.addWidget(self.btn_toggle_log)
@@ -396,7 +394,7 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         # _build creates the rail before the workspaces, and a resize can
         # arrive mid-build, so only react once both exist.
-        if getattr(self, "nav", None) is not None and getattr(self, "qlik_view", None) is not None:
+        if getattr(self, "nav", None) is not None and getattr(self, "powerbi_view", None) is not None:
             self._apply_breakpoint(self.width())
 
     def _apply_breakpoint(self, w):
@@ -406,7 +404,9 @@ class MainWindow(QMainWindow):
         rail = NAV_WIDTH_WIDE if w >= 1440 else NAV_WIDTH
         if self.nav.width() != rail:
             self.nav.setFixedWidth(rail)
-        self.qlik_view.set_hub_columns(2 if w < 1040 else 3)
+        cols = 2 if w < 1040 else 3
+        self.qlik_view.hub.set_columns(cols)
+        self.powerbi_view.hub.set_columns(cols)
 
     # ---------------- navigation ----------------
     def go_to(self, key):
@@ -495,18 +495,16 @@ class MainWindow(QMainWindow):
             qlik = f"Qlik: {len(self.qlik_view.apps)} apps"
         pbi = "Power BI: " + (self.pbi.get("tenant_id") and "configured" or "not configured")
         self.lbl_status.setText(
-            f"Tenant:  {t}   •   Qlik out:  {short(self.output_dir_qlik)}   •   "
-            f"PBI out:  {short(self.output_dir_powerbi)}   •   {qlik}   •   {pbi}")
+            f"Tenant:  {t}   •   Library:  {short(self.output_dir)}   •   {qlik}   •   {pbi}")
 
     # ---------------- settings ----------------
     def _open_settings(self):
         SettingsDialog(self).exec()
 
-    def apply_settings(self, qlik_tenant, qlik_key, output_dir_qlik, output_dir_powerbi, pbi, pbi_secret):
+    def apply_settings(self, qlik_tenant, qlik_key, output_dir, pbi, pbi_secret):
         self.tenant = qlik_tenant
         self.api_key = qlik_key
-        self.output_dir_qlik = output_dir_qlik
-        self.output_dir_powerbi = output_dir_powerbi
+        self.output_dir = output_dir
         self.pbi = pbi
         self.pbi_secret = pbi_secret
         self._save_settings()
@@ -521,13 +519,11 @@ class MainWindow(QMainWindow):
             with open(SETTINGS_FILE, encoding="utf-8") as f:
                 s = json.load(f)
             self.tenant = s.get("tenant", "")
-            # output_dir_qlik/output_dir_powerbi replace the old single
-            # "output_dir" -- fall back to it (both products shared one
-            # folder before) so settings saved by an earlier version still
-            # carry over instead of resetting to blank.
-            legacy = s.get("output_dir", "")
-            self.output_dir_qlik = s.get("output_dir_qlik") or legacy
-            self.output_dir_powerbi = s.get("output_dir_powerbi") or legacy
+            # One library folder replaces the per-product pair. Fall back to
+            # whichever of those an earlier version saved (they were almost
+            # always the same folder) so nobody has to re-pick it.
+            self.output_dir = (s.get("output_dir") or s.get("output_dir_qlik")
+                               or s.get("output_dir_powerbi") or "")
             saved_pbi = s.get("pbi", {}) or {}
             for k in self.pbi:
                 if k in saved_pbi:
@@ -537,33 +533,28 @@ class MainWindow(QMainWindow):
 
     def _save_settings(self):
         try:
-            data = {"tenant": self.tenant, "output_dir_qlik": self.output_dir_qlik,
-                    "output_dir_powerbi": self.output_dir_powerbi, "pbi": self.pbi}
+            data = {"tenant": self.tenant, "output_dir": self.output_dir, "pbi": self.pbi}
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
         except Exception:
             pass
 
-    def _active_output_dir(self):
-        """Which output folder 'Open output folder' should open -- whichever
-        product's workspace is on screen; Home falls back to Qlik, then
-        Power BI, since the button lives in the shared log card."""
-        idx = self.stack.currentIndex()
-        if idx == 2:
-            return self.output_dir_powerbi
-        if idx == 1:
-            return self.output_dir_qlik
-        return self.output_dir_qlik or self.output_dir_powerbi
+    def feature_dir(self, product, feature):
+        """This feature's own subfolder inside the library, so nothing lands
+        loose in one shared folder. Created on demand by whichever writer uses
+        it."""
+        return os.path.join(self.output_dir or os.path.expanduser("~"), product, feature)
 
     def _open_folder(self):
-        d = self._active_output_dir()
+        d = self.output_dir
         if d and os.path.isdir(d):
             try:
                 os.startfile(d)  # Windows
             except AttributeError:
-                QMessageBox.information(self, "Output folder", d)
+                QMessageBox.information(self, "Library folder", d)
         else:
-            QMessageBox.warning(self, "Output folder", "Folder does not exist yet.")
+            QMessageBox.warning(self, "Library folder",
+                               "Set a library folder in Settings first.")
 
 
 def main():

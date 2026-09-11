@@ -9,7 +9,7 @@ One desktop app over **two products**:
   usage analytics with an in-app **Usage dashboard**.
 
 A left nav rail switches **Home · Qlik · Power BI**; the header, status line,
-busy indicator, LOG and output folder are shared. **Settings** is at the bottom
+busy indicator, LOG and library folder are shared. **Settings** is at the bottom
 of the nav rail.
 
 ---
@@ -41,18 +41,28 @@ Open **Settings** (bottom of the nav rail) and fill in what you need:
 - **Qlik:** Tenant host + API key.
 - **Power BI:** Tenant ID, Client ID, an Auth mode, and either the client secret
   or the Key Vault URL + secret name.
-- **Output folders:** a separate one for **Qlik** and for **Power BI** — the two
-  products never write into the same folder. Within each, every feature gets
-  its own subfolder, so nothing lands loose in one shared pile:
-  - Qlik → `<Qlik output>\metadata_export\`, `\comparison_analysis\`,
+- **Library folder:** one folder for everything both products write. Every
+  feature still gets its own subfolder, so nothing lands loose in one pile:
+  - Qlik → `<library>\Qlik\metadata_export\`, `\comparison_analysis\`,
     `\usage_analysis\`, `\capacity_report\`, `\apply_master_items\`,
     `\field_lineage\` (both the QVD field usage report and the interactive
     trace), `\tenant_usage\`.
-  - Power BI → `<Power BI output>\powerbi_data\` (as before), with its own
-    `activity_events\`, `raw\`, `analytics\`, `model_lineage\` subfolders.
-  Upgrading from an older version that had one shared "Output folder"?
-  Both new folders are pre-filled with that old value the first time you open
-  Settings — change either one (or both) as needed.
+  - Power BI → `<library>\powerbi_data\`, with its own `activity_events\`,
+    `raw\`, `analytics\`, `model_lineage\` subfolders. This one keeps its
+    original name on purpose: `collect_daily.bat` and `.env` point `OUTPUT_DIR`
+    at it, so renaming it would break the scheduled daily collection.
+
+  **Sharing it between users.** Point the library at a folder that OneDrive or
+  the SharePoint client syncs, and it becomes the shared library: everyone with
+  access to that SharePoint library sees every report, opens the workbooks in
+  Excel or the browser, and needs no copy of Studio. A plain local folder works
+  too — it is then just your own library. Give everyone who runs Studio the
+  same synced path and their runs land in the same library.
+
+  Upgrading from a version with separate **Qlik** and **Power BI** output
+  folders? The library is pre-filled from whichever of those was set, so there
+  is nothing to re-pick. Qlik output now sits one level deeper, under
+  `Qlik\`; earlier exports stay where they are.
 
 Secrets (Qlik API key, Power BI client secret) are **never saved to disk** —
 re-enter them each session. Everything else is remembered in
@@ -62,16 +72,18 @@ re-enter them each session. Everything else is remembered in
 
 ## 3. Qlik workspace
 Click **Load apps**, tick the apps you want (picks stick across filtering), then
-use a tab: **Extract metadata · Comparison analysis · Usage analysis · Apply
-master items · Field lineage · Capacity report · Tenant usage**. The Capacity
-tab scans the whole tenant, shows a dashboard (billed % gauge, duplicate-reclaim
-and per-space charts, colour-coded action list) **and** writes
-`capacity_report_*.xlsx`.
+open a task from the hub: **Extract metadata · Comparison analysis · Usage &
+leanness · Apply master items · Field lineage · Capacity report · Tenant QVD
+usage · Diagnose visibility**. One task fills the page at a time; **← All
+tasks** in the breadcrumb goes back to the hub. Hover a button or checkbox for
+the full explanation of what it does. The Capacity report scans the whole
+tenant, shows a dashboard (billed % gauge, duplicate-reclaim and per-space
+charts, colour-coded action list) **and** writes `capacity_report_*.xlsx`.
 
 *Apply master items* is the only write path — Dry run is on by default, a backup
 is exported first, and a confirmation dialog appears before any real write.
 
-The **Field lineage** tab has two independent tools:
+The **Field lineage** task has two independent tools:
 - **QVD field usage report** — batch mode: for every selected app, scans the
   load script's QVD-sourced LOAD statements and cross-checks every field
   against the live data model, so you can see, per app, which source QVDs
@@ -83,7 +95,7 @@ The **Field lineage** tab has two independent tools:
   for exactly what it does not evaluate). Tick "Also trace upstream to the
   true source" to additionally resolve each confirmed QVD's real origin —
   a database table/view, or wherever the chain of Qlik apps producing that
-  QVD ultimately stops — mirroring the Power BI Model lineage tab's goal
+  QVD ultimately stops — mirroring the Power BI Model lineage task's goal
   (source, all the way to the final model) but for Qlik. This is slower: it
   opens every QVD's producing app via Qlik's own lineage graph, one time per
   distinct QVD across the whole scan (not per field).
@@ -91,7 +103,7 @@ The **Field lineage** tab has two independent tools:
   see the pipeline that field took *into* this app, optionally extended
   upstream across apps via Qlik's own lineage graph.
 
-The **Tenant usage** tab answers the same two questions as the QVD field usage
+The **Tenant QVD usage** task answers the same two questions as the QVD field usage
 report, but tenant-wide, for the *entire* lineage, and for exactly what
 matters for governance: no app selection needed — it starts from every
 **published** app (unpublished/personal apps are not scan roots, since nobody
@@ -154,7 +166,10 @@ person's account lifecycle is a continuity risk independent of what this
 tool can see.
 
 ## 4. Power BI workspace
-- **Collect** — pick a UTC **date range** (From / To, defaults to the last 7 days
+Same shape as the Qlik workspace: a hub of four tasks, one page each, with
+**← All tasks** to get back and the detail on hover.
+
+- **Collect activity events** — pick a UTC **date range** (From / To, defaults to the last 7 days
   up to yesterday) and pull each day. Days already collected are skipped, so
   re-running is safe. **Catch up (last 28 days)** backfills everything still in
   Power BI's ~28-day retention window in one click.
@@ -207,8 +222,8 @@ There is no automatic collection yet. Two ways to keep the daily history flowing
    - Copy `.env.example` -> `.env`; fill in `PBI_TENANT_ID`, `PBI_CLIENT_ID`, and
      a **Key Vault** (recommended) or managed-identity credential — an unattended
      task can't use a secret typed into the app each session.
-   - Set `OUTPUT_DIR` in `.env` to your app's `<Output folder>\powerbi_data` so
-     the in-app dashboard reads the scheduled collections too.
+   - Set `OUTPUT_DIR` in `.env` to your app's `<library folder>\powerbi_data`
+     so the in-app dashboard reads the scheduled collections too.
    - **Task Scheduler -> Create Task** -> Trigger: Daily, ~06:00 local -> Action:
      *Start a program* -> Program: `collect_daily.bat`, "Start in" = this folder.
      Tick *Run whether the user is logged on or not*.
