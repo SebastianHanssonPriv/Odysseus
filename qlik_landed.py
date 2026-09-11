@@ -339,7 +339,13 @@ def scan_landed_impact(apps, read_script, read_detail, log=None, cancel_check=No
     for (qvd, field), rows in sorted(grouped.items()):
         states = [r["state"] for r in rows]
         best = best_state(states)
-        tiers = [r["app_tier"] for r in rows if r["app_tier"]]
+        # Only an app that actually gets the field into its model lends it a
+        # criticality. A field that is script-only everywhere reaches nothing,
+        # so inheriting a High tier from the app that drops it would read as
+        # "this matters a lot" when the truth is the opposite.
+        tiers = [r["app_tier"] for r in rows if r["app_tier"]
+                 and r["state"] in (STATE_IN_MODEL_USED, STATE_IN_MODEL_UNUSED,
+                                    STATE_OTHER_TABLE, STATE_UNKNOWN)]
         top = ("High" if "High" in tiers else
                ("Medium" if "Medium" in tiers else ("Low" if tiers else "")))
         fields.append({

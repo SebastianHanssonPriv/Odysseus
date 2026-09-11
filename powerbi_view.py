@@ -28,8 +28,10 @@ from PySide6.QtWidgets import (
 
 from config import Settings
 import reports
+import pbi_landed
 from widgets import (
-    TEAL, WARN, GOOD, BAD, ActionBar, TaskHub, make_card, label, tip, kpi_row, line_chart,
+    TEAL, WARN, GOOD, BAD, ActionBar, Banner, TaskHub, make_card, label, tip, kpi_row,
+    line_chart,
     ranked_bars,
     colored_table, clear_layout,
 )
@@ -43,6 +45,7 @@ class PowerBIView(QWidget):
     sig_error = Signal(str, str)
     sig_usage_data = Signal(object)      # list of view records
     sig_lineage_done = Signal(str)
+    sig_landed_done = Signal(str)
 
     def __init__(self, shell):
         super().__init__()
@@ -53,6 +56,7 @@ class PowerBIView(QWidget):
         self.sig_error.connect(lambda t, m: QMessageBox.critical(self, t, m))
         self.sig_usage_data.connect(self._on_usage_data)
         self.sig_lineage_done.connect(self._on_lineage_text)
+        self.sig_landed_done.connect(self._on_landed_text)
         self._build()
 
     def log(self, msg):
@@ -284,6 +288,47 @@ class PowerBIView(QWidget):
         ml.addWidget(self.lineage_panel, 1)
         self.hub.add(tab_m, "Model lineage", "Semantic model table to warehouse source, direct "
                      "or through a Gen1 dataflow.", "tenant-wide", bar=self.bar_lineage)
+
+        # Dataflow field impact
+        tab_d = QWidget()
+        dl = QVBoxLayout(tab_d)
+        dl.setContentsMargins(0, 10, 0, 0)
+        dc = make_card()
+        dcl = QVBoxLayout(dc)
+        dcl.addWidget(label("DATAFLOW FIELD IMPACT", "section"))
+        dcl.addWidget(label("Every field a Gen1 dataflow lands, and what depends on it. The "
+                            "Power BI counterpart of the Qlik landed-QVD report.", "muted"))
+        dcl.addWidget(Banner(
+            "Power BI's Admin APIs expose no visual or report-page content, so the strongest "
+            "available signal is whether a measure or calculated column's DAX references a "
+            "column. A column dropped straight onto a visual is invisible to every API - so "
+            '"no DAX reference" is a shortlist to check, never proof a field is unused.',
+            "warn"))
+        self.chk_landed_usage = QCheckBox("Include collected activity events in criticality")
+        self.chk_landed_usage.setChecked(True)
+        tip(self.chk_landed_usage,
+            "Uses the activity events already collected to put real views and distinct users "
+            "into each model's criticality, and reports how many days those events cover.\n\n"
+            "Untick to score on structure alone. With no events collected the scan does that "
+            "anyway and says so, rather than scoring an unmeasured model as unused.")
+        dcl.addWidget(self.chk_landed_usage)
+        dl.addWidget(dc)
+        self.landed_panel = QPlainTextEdit()
+        self.landed_panel.setReadOnly(True)
+        self.landed_panel.setMinimumHeight(150)
+        dl.addWidget(self.landed_panel, 1)
+        self.btn_pbi_landed = QPushButton("Scan dataflow impact")
+        tip(self.btn_pbi_landed,
+            "One tenant-wide Scanner walk, the same one Model lineage uses. For every model "
+            "table sourced through a Gen1 dataflow, reports each field as referenced by DAX, "
+            "in the model with no DAX reference, or selected by the dataflow and absent from "
+            "the model.\n\nNeeds the tenant setting 'Enhance admin APIs responses with DAX "
+            "and mashup expressions'; without it nothing resolves.")
+        self.btn_pbi_landed.clicked.connect(self._on_pbi_landed)
+        self.bar_pbi_landed = ActionBar(self.btn_pbi_landed,
+                                        status="Tenant-wide  ·  no workspace selection needed")
+        self.hub.add(tab_d, "Dataflow field impact", "Every field a Gen1 dataflow lands, and "
+                     "what depends on it.", "tenant-wide", bar=self.bar_pbi_landed)
 
         self.hub.finish()
         self._refresh_bars()
@@ -542,6 +587,98 @@ class PowerBIView(QWidget):
         finally:
             self.sig_done.emit("lineage")
 
+    # ================= dataflow field impact =================
+    def _on_landed_text(self, text):
+        self.landed_panel.setPlainText(text)
+
+    def _on_pbi_landed(self):
+        data_dir = self._data_dir()
+        if not data_dir:
+            return
+        try:
+            settings = self._pbi_settings(data_dir)
+        except ValueError as e:
+            QMessageBox.warning(self, "Power BI settings", str(e))
+            return
+        self.btn_pbi_landed.setEnabled(False)
+        self.shell.busy_begin("Scanning dataflow field impact",
+                              ["Scan the tenant", "Read collected usage", "Write report"])
+        self.log("Scanning Gen1 dataflow field impact (tenant-wide) ...")
+        threading.Thread(target=self._pbi_landed_worker,
+                         args=(settings, data_dir, self.chk_landed_usage.isChecked()),
+                         daemon=True).start()
+
+    def _pbi_landed_worker(self, settings, data_dir, with_usage):
+        t0 = time.time()
+        try:
+            from auth import PowerBITokenProvider
+            from powerbi_client import PowerBIAdminClient
+            from model_lineage import scan_model_lineage
+
+            tokens = PowerBITokenProvider(settings)
+            client = PowerBIAdminClient(tokens)
+            self.shell.run_step(0)
+            sink = {}
+            lineage = scan_model_lineage(client, cancel_check=self.shell.cancel_requested,
+                                         log=self.shell.sig_log.emit, sink=sink)
+            if self.shell.cancel_requested():
+                self.log("Dataflow impact scan cancelled - no report written.")
+                return
+            if not lineage:
+                self.log("No semantic models found.")
+                return
+            pbi_reports = sink.get("reports", [])
+            self.log(f"  {len(pbi_reports)} report(s) mapped to their semantic model.")
+
+            self.shell.run_step(1, f"{len(lineage)} tables")
+            views = window = None
+            if with_usage:
+                try:
+                    import analytics
+                    frames = analytics.compute(data_dir)
+                    rud = frames["report_usage_daily"]
+                    records = [{"report_id": str(r.report_id), "user": str(r.user),
+                                "date": str(r.date), "views": int(r.views)}
+                               for r in rud.itertuples(index=False)]
+                    views, window = pbi_landed.views_from_records(records)
+                    self.log(f"  usage: {len(records):,} row(s) over {window} collected day(s).")
+                except SystemExit as e:
+                    # analytics raises SystemExit when there are no events yet.
+                    self.log(f"  no collected activity events ({e}) - criticality will be "
+                             "structural only.")
+                except Exception as e:
+                    self.log(f"  could not read collected usage ({e}) - criticality will be "
+                             "structural only.")
+
+            res = pbi_landed.scan_dataflow_impact(lineage, pbi_reports, views, window,
+                                                  log=self.shell.sig_log.emit)
+            self.sig_landed_done.emit(pbi_landed.render_text(res))
+            if not res["entities"]:
+                self.log("No model table resolved to a Gen1 dataflow - nothing to report.")
+                return
+            self.shell.run_step(2, f"{len(res['fields'])} field rows")
+            out_path = pbi_landed.write_report(res, data_dir / "dataflow_impact",
+                                              self.shell.sig_log.emit)
+            self.shell.run_finish()
+            impact = sum(1 for r in res["fields"] if r["has_impact"])
+            carried = sum(1 for r in res["fields"]
+                          if r["best_state"] == pbi_landed.STATE_IN_MODEL_UNUSED)
+            dropped = sum(1 for r in res["fields"]
+                          if r["best_state"] == pbi_landed.STATE_DROPPED)
+            self._record(out_path, "dataflow_impact", "Dataflow field impact",
+                         scope=f"{len(res['entities'])} dataflow entities", started=t0,
+                         headline=[reports.num("Dataflow fields", len(res["fields"])),
+                                   reports.num("Referenced by DAX", impact),
+                                   reports.num("No DAX reference", carried),
+                                   reports.num("Dropped before the model", dropped)])
+        except Exception as e:
+            self.log(f"ERROR scanning dataflow impact: {e}")
+            self.sig_error.emit("Dataflow impact scan failed",
+                                f"{e}\n\nCheck the Power BI credentials in Settings, and that "
+                                "the service principal is in the Power BI admin group.")
+        finally:
+            self.sig_done.emit("pbi_landed")
+
     # ---------- filter wiring ----------
     def _on_usage_data(self, records):
         self._records = records
@@ -756,3 +893,5 @@ class PowerBIView(QWidget):
             self.btn_analytics.setEnabled(True)
         elif which == "lineage":
             self.btn_lineage.setEnabled(True)
+        elif which == "pbi_landed":
+            self.btn_pbi_landed.setEnabled(True)

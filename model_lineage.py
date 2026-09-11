@@ -177,12 +177,20 @@ _BAD_STATUSES = {"unresolved", "no_expression_available", "dataflow_export_faile
 _WARN_STATUSES = {"dataflow_reference_incomplete", "max_hops_exceeded", "multiple_direct_sources"}
 
 
-def scan_model_lineage(client, scan_timeout_seconds=600, cancel_check=None, log=print):
+def scan_model_lineage(client, scan_timeout_seconds=600, cancel_check=None, log=print,
+                       sink=None):
     """Tenant-wide: for every table in every semantic model, resolve its
     source (direct connector, or chased through Gen1 dataflow(s)) and, where
     the M code says so explicitly, which fields survive. Returns a list of
     TableSourceResult as dicts. cancel_check, if given, is polled between
-    workspaces and stops the scan early without raising."""
+    workspaces and stops the scan early without raising.
+
+    `sink`, if given, is a dict this fills with the other artifacts the same
+    Scanner walk already returns - "reports" and "dataflows", each with the
+    workspace they live in. The scan is the expensive part, so a caller that
+    needs to attribute report views to a dataset gets that for free here
+    instead of walking the tenant twice. Existing callers pass nothing and
+    see no change."""
     dataflow_cache = DataflowCache(client)
     workspace_ids = list(list_workspace_ids(client))
     results = []
@@ -199,6 +207,21 @@ def scan_model_lineage(client, scan_timeout_seconds=600, cancel_check=None, log=
             continue
         for key in tally:
             tally[key] += len(workspace.get(key) or [])
+        if sink is not None:
+            ws_id = workspace.get("id", "")
+            ws_name = workspace.get("name", "") or ws_id
+            for r in (workspace.get("reports") or []):
+                sink.setdefault("reports", []).append({
+                    "id": r.get("id", ""), "name": r.get("name", ""),
+                    "dataset_id": r.get("datasetId", "") or "",
+                    "workspace_id": ws_id, "workspace_name": ws_name,
+                })
+            for d in (workspace.get("dataflows") or []):
+                sink.setdefault("dataflows", []).append({
+                    "id": d.get("objectId", "") or d.get("id", ""),
+                    "name": d.get("name", ""),
+                    "workspace_id": ws_id, "workspace_name": ws_name,
+                })
         results.extend(_resolve_workspace_datasets(workspace, dataflow_cache, log))
 
     real_tables = [r for r in results if r["status"] != "dataset_has_no_tables"]

@@ -291,7 +291,7 @@ colleague without Studio just opens the workbooks from SharePoint.
 The **Home** overview shows the three newest runs and a link into the library.
 
 ## 4. Power BI workspace
-Same shape as the Qlik workspace: a hub of four tasks, one page each, with
+Same shape as the Qlik workspace: a hub of five tasks, one page each, with
 **← All tasks** to get back and the detail on hover.
 
 - **Collect activity events** — pick a UTC **date range** (From / To, defaults to the last 7 days
@@ -355,6 +355,59 @@ There is no automatic collection yet. Two ways to keep the daily history flowing
    Each run appends one day; **Usage analytics** then visualises the accumulated
    history. This feeds a Power BI semantic model for usage reporting until the
    move to Fabric in winter-26 / spring-27.
+
+### Dataflow field impact
+The Power BI counterpart of **Landed QVD impact**. A Gen1 dataflow entity is
+Power BI's answer to a QVD — a table staged by a separate artifact and then
+read by semantic models — so "landed" here means a model table whose source
+resolves through at least one dataflow hop. One tenant-wide Scanner walk, the
+same one Model lineage uses.
+
+Each field gets one of five states **per model table**:
+
+| State | Meaning |
+|---|---|
+| `in model, referenced by DAX` | A column of the model table, and a measure or calculated column's DAX references it. This is "has impact". |
+| `in model, no DAX reference` | A column of the model table with no DAX reference anywhere in the dataset. **A shortlist to check, not a finding** — see the limit below. |
+| `in the dataflow, not in the model` | The dataflow's M code selects the field but no model table exposes a column by that name: dropped, renamed, or folded into something else. |
+| `dataflow columns not narrowed` | The dataflow's M code passes everything through, so what it carries cannot be read from it. The model's own columns are still listed. |
+| `source not resolved` | The table's source could not be chased far enough to say. |
+
+**Two differences from the Qlik report, both in the labels.**
+
+*The "used" signal is weaker.* Qlik's Engine API exposes every measure,
+dimension and visual expression, so "referenced" there means referenced by
+something a user sees. Power BI's Admin APIs expose **no visual or report-page
+content at all**, so the strongest signal available is whether a DAX expression
+references the column. A column dropped straight onto a table, chart or slicer
+with no calculation involved is invisible to this scan and to every other
+API-based tool. That is why every label here says "referenced by DAX" and the
+Qlik one says "referenced".
+
+*The usage signal is real, but short.* Unlike Qlik, Power BI does expose
+per-report view events, and Studio collects them — so model criticality here
+uses **actual views and actual distinct users**, rolled up from each report to
+the semantic model it is built on. The ceiling is retention: Microsoft keeps
+activity events about 28 days, so the window is only as wide as the history you
+have collected, and the report states how many days that is rather than
+implying more. There is no quarterly or yearly figure until that much history
+exists. With no events collected the scan scores on structure alone and says
+so — a model with no events is **unmeasured, not unused**.
+
+The tier: 3+ reports built on it (+3) or 1–2 (+2); 100+ views in the window
+(+3), some views (+2), no views (−1); 5+ distinct users (+1); 10+ tables (+1).
+High from 5, Medium from 3. The Criticality sheet shows every component per
+model, including whether usage was measured at all.
+
+Five sheets, mirroring the Qlik report: **Field impact**, **Field reach**,
+**Dataflow entities**, **Criticality**, **Summary**. A field that reaches no
+model shows a blank criticality rather than inheriting the tier of the model
+that dropped it.
+
+Everything depends on the tenant setting **Enhance admin APIs responses with
+DAX and mashup expressions**. Without it every table comes back as
+`no_expression_available` and nothing resolves. Gen2 (Fabric) dataflows and
+lakehouse shortcuts are not Gen1 dataflow hops and will not appear here.
 
 ## 5. Home
 Opens on a cross-product overview: Qlik billed-capacity % + reclaim, and Power BI
