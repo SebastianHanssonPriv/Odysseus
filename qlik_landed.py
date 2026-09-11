@@ -59,10 +59,14 @@ STATE_WILDCARD = "wildcard"
 STATE_SCRIPT_ONLY = "script only"
 STATE_OTHER_TABLE = "in model, other table"
 STATE_IN_MODEL_UNUSED = "in model, unused"
+STATE_UNKNOWN = "in model, usage unknown"
 STATE_IN_MODEL_USED = "in model, referenced"
 
+# Ranked weakest to strongest evidence that something depends on the field.
+# "usage unknown" outranks "unused" deliberately: unused is a finding, unknown
+# is a gap, and a roll-up across apps must not turn a gap into a delete hint.
 STATE_ORDER = [STATE_WILDCARD, STATE_SCRIPT_ONLY, STATE_OTHER_TABLE,
-               STATE_IN_MODEL_UNUSED, STATE_IN_MODEL_USED]
+               STATE_IN_MODEL_UNUSED, STATE_UNKNOWN, STATE_IN_MODEL_USED]
 _STATE_RANK = {s: i for i, s in enumerate(STATE_ORDER)}
 
 STATE_HELP = {
@@ -75,6 +79,8 @@ STATE_HELP = {
                        "Check it rather than trusting either answer.",
     STATE_WILDCARD: "A wildcard folder load - no script parse can enumerate its fields. Not a "
                     "verdict; the QVD's fields are simply unknown from the script.",
+    STATE_UNKNOWN: "In the data model, but this app's usage scan did not complete, so whether "
+                   "anything references it is unknown. A gap in the scan, not a finding.",
 }
 
 
@@ -97,7 +103,7 @@ def classify(row):
     # than as "unused", so a gap in the scan is never read as a delete hint.
     used = row.get("used_in_report")
     if used is None:
-        return STATE_OTHER_TABLE
+        return STATE_UNKNOWN
     return STATE_IN_MODEL_USED if used else STATE_IN_MODEL_UNUSED
 
 
@@ -179,15 +185,24 @@ def score_app(app):
 
 
 # --------------------------------------------------------------- the scan
-def scan_landed_impact(apps, read_app, log=None, cancel_check=None):
+def scan_landed_impact(apps, read_script, read_detail, log=None, cancel_check=None):
     """Build the whole picture.
 
     `apps` is core.list_apps() output, each enriched with space_name and
-    (best-effort) published/reloaded. `read_app(guid)` returns
-    {script, model_fields, objects, usage_result} or None - the caller owns
-    the engine session, so this stays testable.
+    (best-effort) published/reloaded.
 
-    Returns {"qvds", "fields", "reach", "consumers", "skipped", "extractors"}.
+    Two callbacks, not one, and the split matters on a real tenant. Deciding
+    whether an app touches a landed QVD needs only its load script;
+    classifying its fields needs the model, every master item, every visual
+    and a full usage analysis. On a tenant with two thousand apps, most of
+    which read no landed QVD at all, fetching the second for all of them
+    would cost hours for nothing.
+
+      read_script(guid) -> str | None
+      read_detail(guid) -> {model_fields, objects, usage_result} | None
+
+    Returns {"qvds", "fields", "reach", "consumers", "skipped", "extractors"},
+    or None if cancelled.
     """
     log = log or (lambda _m: None)
     cancel = cancel_check or (lambda: False)
@@ -207,11 +222,11 @@ def scan_landed_impact(apps, read_app, log=None, cancel_check=None):
         if cancel():
             return None
         log(f"  extractor {i + 1}/{len(extractors)}: {a['name']}")
-        data = read_app(a["guid"])
-        if not data:
+        script = read_script(a["guid"])
+        if script is None:
             skipped.append({"app": a["name"], "guid": a["guid"], "why": "could not be opened"})
             continue
-        stores, reads = core.parse_store_reads(data.get("script") or "")
+        stores, reads = core.parse_store_reads(script)
         # An extractor reading another extractor's QVD still counts as
         # something reading it, so keep these out of the fan-out maps but in
         # the "is anything reading this at all" set.
@@ -231,12 +246,10 @@ def scan_landed_impact(apps, read_app, log=None, cancel_check=None):
     for i, a in enumerate(others):
         if cancel():
             return None
-        log(f"  app {i + 1}/{len(others)}: {a['name']}")
-        data = read_app(a["guid"])
-        if not data:
+        script = read_script(a["guid"])
+        if script is None:
             skipped.append({"app": a["name"], "guid": a["guid"], "why": "could not be opened"})
             continue
-        script = data.get("script") or ""
         stores, reads = core.parse_store_reads(script)
         produces[a["guid"]] = stores
         reads_by_guid[a["guid"]] = reads
@@ -244,25 +257,35 @@ def scan_landed_impact(apps, read_app, log=None, cancel_check=None):
         if not touched:
             continue
 
+        # Only now is the expensive half worth fetching.
+        log(f"  consumer: {a['name']} ({len(touched)} landed QVD(s))")
+        data = read_detail(a["guid"]) or {}
         tables = core.parse_load_tables(script)
         rows = core.analyze_qvd_field_usage(tables, data.get("model_fields") or [])
         usage = data.get("usage_result")
         if usage:
             core.attach_report_usage(rows, usage)
         else:
+            skipped.append({"app": a["name"], "guid": a["guid"],
+                            "why": "reads a landed QVD, but its model/usage scan failed - its "
+                                   "fields are reported as usage unknown"})
             for r in rows:
                 r["used_in_report"] = None
 
-        used_here = reaching_here = 0
+        used_here, reaching_here = set(), set()
         for r in rows:
             qvd = (r.get("qvd_file") or "").lower()
             if qvd not in landed:
                 continue                   # reads a QVD, but not a landed one
             state = classify(r)
+            # By field name, not by row: a field read from two landed QVDs
+            # produces two rows and is still one field.
+            fname = (r.get("final_field") or r.get("source_field") or "").lower()
             if state == STATE_IN_MODEL_USED:
-                used_here += 1
-            if state in (STATE_IN_MODEL_USED, STATE_IN_MODEL_UNUSED, STATE_OTHER_TABLE):
-                reaching_here += 1
+                used_here.add(fname)
+            if state in (STATE_IN_MODEL_USED, STATE_IN_MODEL_UNUSED, STATE_OTHER_TABLE,
+                         STATE_UNKNOWN):
+                reaching_here.add(fname)
             src = r.get("source_field") or ""
             fin = r.get("final_field") or ""
             reach.append({
@@ -284,8 +307,8 @@ def scan_landed_impact(apps, read_app, log=None, cancel_check=None):
             "name": a["name"], "guid": a["guid"], "space": a.get("space_name", ""),
             "published": a.get("published"), "reload": a.get("reloaded", ""),
             "objects": len(data.get("objects") or []),
-            "landed_qvds": len(touched), "landed_fields_used": used_here,
-            "landed_fields_reaching": reaching_here,
+            "landed_qvds": len(touched), "landed_fields_used": len(used_here),
+            "landed_fields_reaching": len(reaching_here),
         })
 
     # --- phase 3: fan-out, then score each consumer ---
@@ -294,8 +317,12 @@ def scan_landed_impact(apps, read_app, log=None, cancel_check=None):
         all_reads |= rs
     for c in consumers:
         mine = produces.get(c["guid"]) or set()
+        # An extractor reading this app's output is a downstream dependency
+        # too, so its reads are one extra bucket rather than being ignored.
         c["downstream_apps"] = sum(
             1 for g, rs in reads_by_guid.items() if g != c["guid"] and (rs & mine))
+        if mine & extractor_reads:
+            c["downstream_apps"] += 1
         c.update(score_app(c))
 
     by_guid = {c["guid"]: c for c in consumers}
@@ -321,7 +348,7 @@ def scan_landed_impact(apps, read_app, log=None, cancel_check=None):
             "field": field,
             "has_impact": best == STATE_IN_MODEL_USED,
             "reaches_a_model": best in (STATE_IN_MODEL_USED, STATE_IN_MODEL_UNUSED,
-                                        STATE_OTHER_TABLE),
+                                        STATE_OTHER_TABLE, STATE_UNKNOWN),
             "apps": len({r["app_guid"] for r in rows}),
             "best_state": best,
             "states": ", ".join(sorted(set(states))),
@@ -371,22 +398,25 @@ def render_text(result):
     tiers = {}
     for c in result["consumers"]:
         tiers[c["tier"]] = tiers.get(c["tier"], 0) + 1
+    unknown = sum(1 for r in f if r["best_state"] == STATE_UNKNOWN)
     lines = [
         "LANDED QVD FIELD IMPACT",
         "",
-        f"Extractor apps           {len(result['extractors'])}",
-        f"Landed QVDs              {len(result['qvds'])}",
-        f"Consuming apps           {len(result['consumers'])}"
+        f"Extractor apps          {len(result['extractors'])}",
+        f"Landed QVDs             {len(result['qvds'])}",
+        f"Consuming apps          {len(result['consumers'])}"
         f"   (High {tiers.get('High', 0)} / Medium {tiers.get('Medium', 0)} /"
         f" Low {tiers.get('Low', 0)})",
-        f"Distinct landed fields   {len(f)}",
+        f"Distinct landed fields  {len(f)}",
         "",
-        f"  with impact somewhere         {impact}",
-        f"  in a model, referenced by     {carried}    <- loaded and carried for nothing",
-        f"    nothing",
-        f"  script only, never in a model {script_only}",
-        "",
+        "Of those fields, at their strongest state anywhere:",
+        f"  {impact:6}  have impact - in a model and referenced",
+        f"  {carried:6}  in a model, referenced by nothing (carried for nothing)",
+        f"  {script_only:6}  read by a script but never reach any model",
     ]
+    if unknown:
+        lines.append(f"  {unknown:6}  in a model, usage unknown (a scan gap, not a finding)")
+    lines.append("")
     if dead_qvds:
         lines.append(f"{len(dead_qvds)} landed QVD(s) that no scanned app reads at all:")
         for q in dead_qvds[:15]:
@@ -513,6 +543,8 @@ def _summary_rows(result):
          sum(1 for r in f if r["best_state"] == STATE_IN_MODEL_UNUSED)],
         ["  script only, never in a model",
          sum(1 for r in f if r["best_state"] == STATE_SCRIPT_ONLY)],
+        ["  in a model, usage unknown",
+         sum(1 for r in f if r["best_state"] == STATE_UNKNOWN)],
         ["Apps that could not be opened", len(result["skipped"])],
         ["", ""],
         ["WHAT \"HAS IMPACT\" MEANS", ""],

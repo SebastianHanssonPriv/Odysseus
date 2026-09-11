@@ -1531,33 +1531,58 @@ class QlikView(QWidget):
 
             seen = [0]
 
-            def read_app(guid, _t=tenant, _k=key, _o=out_dir):
-                """One engine session per app: script, model, objects, usage."""
+            def _open(guid, _t=tenant, _k=key, _o=out_dir):
+                exp = core.QlikExporter(_t, _k, guid, _o, self.shell.sig_log.emit)
+                exp.connect()
+                h = exp.call(-1, "OpenDoc", [guid])["qReturn"]["qHandle"]
+                return exp, h
+
+            def read_script(guid, _k=key):
+                """The cheap half, fetched for every app: just the load script.
+
+                Returns None only when the app could not be opened at all, so
+                the scan can tell 'no script' from 'no access' - an empty
+                script is a valid answer and must not be read as a failure."""
                 seen[0] += 1
                 self.shell.run_progress(seen[0], len(apps), "apps read")
-                exp = core.QlikExporter(_t, _k, guid, _o, self.shell.sig_log.emit)
+                exp = None
                 try:
-                    exp.connect()
-                    h = exp.call(-1, "OpenDoc", [guid])["qReturn"]["qHandle"]
+                    exp, h = _open(guid)
+                    return exp.fetch_script(h) or ""
+                except Exception as e:
+                    self.shell.sig_log.emit(f"  (could not open {guid}: {scrub(_k, e)})")
+                    return None
+                finally:
+                    if exp is not None:
+                        exp.close()
+
+            def read_detail(guid, _k=key):
+                """The expensive half, fetched only for an app that actually
+                reads a landed QVD: the model, every master item, every visual
+                and a full usage analysis."""
+                exp = None
+                try:
+                    exp, h = _open(guid)
                     model_fields = exp.fetch_model_fields(h)
                     measures = exp.fetch_measures(h)
                     dims = exp.fetch_dimensions(h)
                     variables = exp.fetch_variables(h)
                     objects = exp.fetch_objects(h)
                     return {
-                        "script": exp.fetch_script(h),
                         "model_fields": model_fields,
                         "objects": objects,
                         "usage_result": core.analyze_usage(measures, dims, variables,
                                                            objects, model_fields),
                     }
                 except Exception as e:
-                    self.shell.sig_log.emit(f"  (could not open {guid}: {scrub(_k, e)})")
+                    self.shell.sig_log.emit(f"  (could not analyse {guid}: {scrub(_k, e)})")
                     return None
                 finally:
-                    exp.close()
+                    if exp is not None:
+                        exp.close()
 
-            res = landed.scan_landed_impact(apps, read_app, log=self.shell.sig_log.emit,
+            res = landed.scan_landed_impact(apps, read_script, read_detail,
+                                            log=self.shell.sig_log.emit,
                                             cancel_check=self.shell.cancel_requested)
             if res is None:
                 self.log("Landed impact scan cancelled - no report written.")
