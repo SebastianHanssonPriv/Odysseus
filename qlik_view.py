@@ -28,7 +28,7 @@ import qlik_capacity as qcap
 import reports
 from scope_sheet import ScopeBar
 from widgets import (
-    TEAL, BAD, WARN, GOOD, TaskHub,
+    TEAL, BAD, WARN, GOOD, ActionBar, TaskHub,
     make_card, label, tip,
     key_format_ok, scrub, friendly_load_error, human_bytes,
     MeterBar, kpi_row, ranked_bars, colored_table, clear_layout,
@@ -153,18 +153,16 @@ class QlikView(QWidget):
         row.addWidget(b_sel_none)
         xcl.addLayout(row)
         xl.addWidget(xc)
-        brow = QHBoxLayout()
-        self.btn_run = QPushButton("Run export")
-        self.btn_run.setObjectName("accent")
-        tip(self.btn_run, "Writes one Excel workbook per selected app, containing the item "
-                                "types ticked above, into the Qlik output folder's metadata "
-                                "subfolder.")
-        self.btn_run.clicked.connect(self._on_run)
-        brow.addWidget(self.btn_run)
-        brow.addStretch(1)
-        xl.addLayout(brow)
         xl.addStretch(1)
-        self.hub.add(tab_x, "Extract metadata", "Measures, dimensions, variables, load script and visuals for each app in scope.")
+        self.btn_run = QPushButton("Run export")
+        tip(self.btn_run, "Writes one Excel workbook per selected app, containing the item "
+                          "types ticked above, into the library's Qlik/metadata_export folder.")
+        self.btn_run.clicked.connect(self._on_run)
+        self.bar_export = ActionBar(self.btn_run)
+        for cb in self.checks.values():
+            cb.toggled.connect(lambda _on: self.refresh_ready())
+        self.hub.add(tab_x, "Extract metadata", "Measures, dimensions, variables, load script "
+                     "and visuals for each app in scope.", bar=self.bar_export)
 
         # Comparison
         tab_c = QWidget()
@@ -173,15 +171,11 @@ class QlikView(QWidget):
         cc = make_card()
         ccl = QVBoxLayout(cc)
         ccl.addWidget(label("CROSS-APP CONSISTENCY  (measures & dimensions)", "section"))
-        ccl.addWidget(label("Select 2+ apps in the list above, then run the analysis.", "muted"))
+        ccl.addWidget(label("Needs at least two apps in scope.", "muted"))
         cl.addWidget(cc)
-        crow = QHBoxLayout()
         self.btn_analyze = QPushButton("Analyze consistency")
-        self.btn_analyze.setObjectName("accent")
         self.btn_analyze.clicked.connect(self._on_analyze)
-        crow.addWidget(self.btn_analyze)
-        crow.addStretch(1)
-        cl.addLayout(crow)
+        self.bar_compare = ActionBar(self.btn_analyze)
         cons_scroll = QScrollArea()
         cons_scroll.setWidgetResizable(True)
         cons_holder = QWidget()
@@ -192,7 +186,8 @@ class QlikView(QWidget):
         self.cons_dash.addStretch(1)
         cons_scroll.setWidget(cons_holder)
         cl.addWidget(cons_scroll, 1)
-        self.hub.add(tab_c, "Comparison analysis", "Name conflicts and redundancy in measures and dimensions across 2+ apps.")
+        self.hub.add(tab_c, "Comparison analysis", "Name conflicts and redundancy in measures "
+                     "and dimensions across 2+ apps.", bar=self.bar_compare)
 
         # Usage
         tab_u = QWidget()
@@ -209,16 +204,12 @@ class QlikView(QWidget):
                         "separately so you can review them by hand instead of trusting the flag.")
         ucl.addWidget(warn)
         ul.addWidget(uc)
-        urow = QHBoxLayout()
         self.btn_usage = QPushButton("Analyze usage")
-        self.btn_usage.setObjectName("accent")
         tip(self.btn_usage, "Read-only. For each selected app, flags master items, model "
-                                  "fields, tables and variables that nothing references, and shows "
-                                  "them per app below.")
+                            "fields, tables and variables that nothing references, and shows "
+                            "them per app below.")
         self.btn_usage.clicked.connect(self._on_usage)
-        urow.addWidget(self.btn_usage)
-        urow.addStretch(1)
-        ul.addLayout(urow)
+        self.bar_usage = ActionBar(self.btn_usage)
         usel = QHBoxLayout()
         usel.addWidget(label("Show app", "muted"))
         self.cmb_usage_app = QComboBox()
@@ -238,7 +229,8 @@ class QlikView(QWidget):
         self.usage_dash_q.addStretch(1)
         u_scroll.setWidget(u_holder)
         ul.addWidget(u_scroll, 1)
-        self.hub.add(tab_u, "Usage & leanness", "What is not used: master items, model fields, tables and variables.")
+        self.hub.add(tab_u, "Usage & leanness", "What is not used: master items, model fields, "
+                     "tables and variables.", bar=self.bar_usage)
 
         # Apply (WRITE)
         tab_a = QWidget()
@@ -279,54 +271,67 @@ class QlikView(QWidget):
         agrid.addWidget(self.cmb_mode, 2, 1)
         agrid.setColumnStretch(1, 1)
         acl.addLayout(agrid)
-        self.chk_dry = QCheckBox("Dry run (preview only - writes nothing)")
-        self.chk_dry.setChecked(True)
-        acl.addWidget(self.chk_dry)
         al.addWidget(ac)
-        arow = QHBoxLayout()
-        self.btn_apply = QPushButton("Apply to selected app(s)")
-        self.btn_apply.setObjectName("accent")
-        self.btn_apply.clicked.connect(self._on_apply)
-        arow.addWidget(self.btn_apply)
-        arow.addStretch(1)
-        al.addLayout(arow)
         al.addStretch(1)
-        self.hub.add(tab_a, "Apply master items", "Create, update or delete measures and dimensions from a CSV. Dry run first.", "writes")
+        # Two buttons rather than a dry-run checkbox: the design puts the safe
+        # path and the real one side by side so which one you are about to take
+        # is visible in the bar, not folded into a tick you may have left off.
+        self.btn_dry = QPushButton("Dry run")
+        tip(self.btn_dry, "Reports every change the CSV would make and writes nothing.")
+        self.btn_dry.clicked.connect(lambda: self._on_apply(dry=True))
+        self.btn_apply = QPushButton("Apply for real")
+        self.btn_apply.clicked.connect(lambda: self._on_apply(dry=False))
+        self.bar_apply = ActionBar(self.btn_apply, secondary=[self.btn_dry])
+        for ed in (self.ed_meas_csv, self.ed_dim_csv):
+            ed.textChanged.connect(lambda _t: self.refresh_ready())
+        self.hub.add(tab_a, "Apply master items", "Create, update or delete measures and "
+                     "dimensions from a CSV. Dry run first.", "writes", bar=self.bar_apply)
 
-        # Field lineage
+        # QVD field usage. Split from the field trace below into its own task
+        # rather than sharing a page: they need different scopes (any number of
+        # apps vs exactly one) and so cannot share one primary action.
+        tab_q = QWidget()
+        ql = QVBoxLayout(tab_q)
+        ql.setContentsMargins(0, 10, 0, 0)
+        qc = make_card()
+        qcl = QVBoxLayout(qc)
+        qcl.addWidget(label("QVD FIELD USAGE REPORT", "section"))
+        qcl.addWidget(label("Which QVDs each app in scope reads, and which of their fields reach "
+                            "the final data model.", "muted"))
+        self.chk_qvd_upstream = QCheckBox("Also trace upstream to the true source")
+        tip(self.chk_qvd_upstream, "Resolves each confirmed field back to the database table "
+                                   "or file it originally came from. Slower: it opens every "
+                                   "QVD's producing app via Qlik's own lineage graph.")
+        qcl.addWidget(self.chk_qvd_upstream)
+        ql.addWidget(qc)
+        self.qvd_panel = QPlainTextEdit()
+        self.qvd_panel.setReadOnly(True)
+        self.qvd_panel.setMinimumHeight(150)
+        ql.addWidget(self.qvd_panel, 1)
+        self.btn_qvd_usage = QPushButton("Scan QVD field usage")
+        tip(self.btn_qvd_usage, "Writes one combined workbook (qvd_field_usage_*.xlsx) and "
+                                "shows a summary below. Treat 'not found' fields as a "
+                                "prioritized worklist, not a verdict.")
+        self.btn_qvd_usage.clicked.connect(self._on_qvd_usage)
+        self.bar_qvd = ActionBar(self.btn_qvd_usage)
+        self.hub.add(tab_q, "QVD field usage", "Which QVDs each app in scope reads, and which of "
+                     "their fields reach its model.", bar=self.bar_qvd)
+
+        # Trace a field
         tab_l = QWidget()
         ll = QVBoxLayout(tab_l)
         ll.setContentsMargins(0, 10, 0, 0)
         lc = make_card()
         lcl = QVBoxLayout(lc)
-        lcl.addWidget(label("QVD FIELD USAGE REPORT", "section"))
-        lcl.addWidget(label("Which QVDs each selected app reads, and which of their fields reach "
-                            "the final data model.", "muted"))
-        self.chk_qvd_upstream = QCheckBox("Also trace upstream to the true source")
-        tip(self.chk_qvd_upstream, "Resolves each confirmed field back to the database table "
-                                         "or file it originally came from. Slower: it opens every "
-                                         "QVD's producing app via Qlik's own lineage graph.")
-        lcl.addWidget(self.chk_qvd_upstream)
-        qrow = QHBoxLayout()
-        self.btn_qvd_usage = QPushButton("Scan QVD field usage")
-        self.btn_qvd_usage.setObjectName("accent")
-        tip(self.btn_qvd_usage, "Writes one combined workbook (qvd_field_usage_*.xlsx) and "
-                                      "shows a summary below. Treat 'not found' fields as a "
-                                      "prioritized worklist, not a verdict.")
-        self.btn_qvd_usage.clicked.connect(self._on_qvd_usage)
-        qrow.addWidget(self.btn_qvd_usage)
-        qrow.addStretch(1)
-        lcl.addLayout(qrow)
-
-        lcl.addSpacing(10)
-        lcl.addWidget(label("FIELD LINEAGE", "section"))
-        lcl.addWidget(label("The pipeline one field took INTO one app.", "muted"))
+        lcl.addWidget(label("TRACE A FIELD", "section"))
+        lcl.addWidget(label("The pipeline one field took INTO one app. Needs exactly one app in "
+                            "scope.", "muted"))
         irow = QHBoxLayout()
         self.btn_index = QPushButton("Build cross-app index")
         self.btn_index.setObjectName("ghost")
         tip(self.btn_index, "Optional. Indexes every app's load script so the fallback trace "
-                                  "can find a producing app when the native lineage graph has no "
-                                  "answer.")
+                            "can find a producing app when the native lineage graph has no "
+                            "answer.")
         self.btn_index.clicked.connect(self._on_build_index)
         irow.addWidget(self.btn_index)
         self.lbl_index = QLabel("Cross-app index: not built (only used by the fallback trace)")
@@ -336,7 +341,7 @@ class QlikView(QWidget):
         self.chk_native = QCheckBox("Add upstream apps from Qlik's own lineage")
         self.chk_native.setChecked(True)
         tip(self.chk_native, "Extends the pipeline back into the apps that produce the "
-                                   "source, rather than stopping at the first QVD.")
+                             "source, rather than stopping at the first QVD.")
         lcl.addWidget(self.chk_native)
         frow = QHBoxLayout()
         self.btn_load_fields = QPushButton("Load fields")
@@ -347,20 +352,19 @@ class QlikView(QWidget):
         self.cmb_field.setEditable(True)
         self.cmb_field.setInsertPolicy(QComboBox.NoInsert)
         self.cmb_field.lineEdit().setPlaceholderText("Field (load fields first, then type to filter)")
+        self.cmb_field.currentTextChanged.connect(lambda _t: self.refresh_ready())
         frow.addWidget(self.cmb_field, 1)
-        self.btn_trace = QPushButton("Trace lineage")
-        self.btn_trace.setObjectName("accent")
-        tip(self.btn_trace, "Select exactly ONE app above, click 'Load fields', pick a field, "
-                                  "then trace it.")
-        self.btn_trace.clicked.connect(self._on_trace)
-        frow.addWidget(self.btn_trace)
         lcl.addLayout(frow)
         ll.addWidget(lc)
         self.lineage_panel = QPlainTextEdit()
         self.lineage_panel.setReadOnly(True)
         self.lineage_panel.setMinimumHeight(150)
         ll.addWidget(self.lineage_panel, 1)
-        self.hub.add(tab_l, "Field lineage", "Which QVDs an app reads, and the pipeline a single field took into it.")
+        self.btn_trace = QPushButton("Trace field")
+        self.btn_trace.clicked.connect(self._on_trace)
+        self.bar_trace = ActionBar(self.btn_trace)
+        self.hub.add(tab_l, "Trace a field", "The pipeline one field took into one app, back to "
+                     "the database table or file.", bar=self.bar_trace)
 
         # Capacity (controls + dashboard)
         tab_cap = QWidget()
@@ -375,15 +379,11 @@ class QlikView(QWidget):
         tip(self.chk_cap_orphans, "Reads every app's load script to flag imported datasets "
                                         "and data files that no app uses. Slower.")
         capcl.addWidget(self.chk_cap_orphans)
-        caprow = QHBoxLayout()
-        self.btn_capacity = QPushButton("Scan & export capacity report")
-        self.btn_capacity.setObjectName("accent")
+        self.btn_capacity = QPushButton("Scan capacity")
         tip(self.btn_capacity, "No app selection needed. Ranks the biggest savings, shows the "
-                                     "result below and writes one Excel workbook.")
+                               "result below and writes one Excel workbook.")
         self.btn_capacity.clicked.connect(self._on_capacity)
-        caprow.addWidget(self.btn_capacity)
-        caprow.addStretch(1)
-        capcl.addLayout(caprow)
+        self.bar_capacity = ActionBar(self.btn_capacity, status="Tenant-wide  ·  no scope needed")
         capl.addWidget(capc)
 
         # results dashboard (filled after a scan)
@@ -397,7 +397,8 @@ class QlikView(QWidget):
         self.cap_dash.addStretch(1)
         cap_scroll.setWidget(cap_holder)
         capl.addWidget(cap_scroll, 1)
-        self.hub.add(tab_cap, "Capacity report", "Every app's data-model size and every imported dataset, ranked by saving.", "tenant-wide")
+        self.hub.add(tab_cap, "Capacity report", "Every app's data-model size and every imported "
+                     "dataset, ranked by saving.", "tenant-wide", bar=self.bar_capacity)
 
         # Tenant QVD & field usage (published apps only)
         tab_t = QWidget()
@@ -408,9 +409,7 @@ class QlikView(QWidget):
         tcl.addWidget(label("TENANT QVD & FIELD USAGE", "section"))
         tcl.addWidget(label("Published apps walked back through every upstream app that feeds "
                             "them.", "muted"))
-        trow = QHBoxLayout()
-        self.btn_tenant_usage = QPushButton("Scan tenant QVD & field usage")
-        self.btn_tenant_usage.setObjectName("accent")
+        self.btn_tenant_usage = QPushButton("Scan tenant usage")
         tip(self.btn_tenant_usage, 
             "Scans every PUBLISHED app in the tenant, then walks backward via Qlik's own lineage "
             "graph through every upstream/staging app that feeds it, for the full source-to-model "
@@ -421,16 +420,16 @@ class QlikView(QWidget):
             "producing apps stops.\n\nNo app selection needed, but it opens every app in the "
             "lineage, root and upstream alike, so it can take a while.")
         self.btn_tenant_usage.clicked.connect(self._on_tenant_usage)
-        trow.addWidget(self.btn_tenant_usage)
-        trow.addStretch(1)
-        tcl.addLayout(trow)
+        self.bar_tenant = ActionBar(self.btn_tenant_usage,
+                                    status="Tenant-wide  ·  no scope needed  ·  can take a while")
         tl.addWidget(tc)
         self.tenant_usage_panel = QPlainTextEdit()
         self.tenant_usage_panel.setReadOnly(True)
         self.tenant_usage_panel.setMinimumHeight(150)
         tl.addWidget(self.tenant_usage_panel, 1)
         self.hub.add(tab_t, "Tenant QVD usage", "Published apps walked back "
-                       "through every upstream app that feeds them.", "tenant-wide")
+                     "through every upstream app that feeds them.", "tenant-wide",
+                     bar=self.bar_tenant)
 
         # Diagnose visibility is its own task: it is troubleshooting, not part
         # of a tenant scan, and it needs no app selection.
@@ -454,9 +453,7 @@ class QlikView(QWidget):
         dg.addWidget(self.ed_diag_consumer, 1, 1)
         dg.setColumnStretch(1, 1)
         dcl.addLayout(dg)
-        drow = QHBoxLayout()
         self.btn_diag_visibility = QPushButton("Run diagnostic")
-        self.btn_diag_visibility.setObjectName("accent")
         tip(self.btn_diag_visibility, 
             "A suspected app - one you've confirmed sits in someone's Personal space, say - can be "
             "invisible to this tool's normal app list without ever showing up as an error.\n\n"
@@ -465,19 +462,62 @@ class QlikView(QWidget):
             "via the Engine API, and whether it appears in another app's native lineage graph as a "
             "producer.")
         self.btn_diag_visibility.clicked.connect(self._on_diag_visibility)
-        drow.addWidget(self.btn_diag_visibility)
-        drow.addStretch(1)
-        dcl.addLayout(drow)
+        self.bar_diag = ActionBar(self.btn_diag_visibility)
+        self.ed_diag_guid.textChanged.connect(lambda _t: self.refresh_ready())
         dl.addWidget(dc)
         self.diag_visibility_panel = QPlainTextEdit()
         self.diag_visibility_panel.setReadOnly(True)
         self.diag_visibility_panel.setMinimumHeight(120)
         dl.addWidget(self.diag_visibility_panel, 1)
         self.hub.add(tab_d, "Diagnose visibility", "Test whether a specific "
-                       "app GUID is reachable with the current key.", "advanced")
+                     "app GUID is reachable with the current key.", "advanced",
+                     bar=self.bar_diag)
 
         self.hub.finish()
+        self.refresh_ready()
         return self.hub
+
+    # ---------------- action-bar readiness ----------------
+    def refresh_ready(self):
+        """Keep every action bar's status line and primary button honest.
+
+        Called on any scope change and whenever a page's own inputs change, so
+        a task that cannot run yet says why in the bar instead of letting you
+        click and collect a warning dialog (REDESIGN_SPEC.md step 5)."""
+        n = len(self.shell.scope)
+        apps = f"{n} app{'' if n == 1 else 's'} in scope"
+        none_in_scope = "Nothing in scope - use Change scope above"
+
+        types = sum(1 for cb in self.checks.values() if cb.isChecked())
+        self.bar_export.set_status(f"{apps}  ·  {types} item type{'' if types == 1 else 's'}")
+        self.bar_export.set_ready(
+            n and types,
+            none_in_scope if not n else "Tick at least one item type to export")
+
+        self.bar_compare.set_status(apps)
+        self.bar_compare.set_ready(n >= 2, "Needs at least two apps in scope to compare")
+
+        self.bar_usage.set_status(f"{apps}  ·  read-only")
+        self.bar_usage.set_ready(n, none_in_scope)
+
+        csv_count = sum(1 for ed in (self.ed_meas_csv, self.ed_dim_csv) if ed.text().strip())
+        self.bar_apply.set_status(f"{apps}  ·  {csv_count} CSV loaded  ·  WRITES to these apps")
+        self.bar_apply.set_ready(
+            n and csv_count,
+            none_in_scope if not n else "Choose a measures and/or dimensions CSV")
+        self.btn_dry.setEnabled(bool(n and csv_count))
+
+        self.bar_qvd.set_status(apps)
+        self.bar_qvd.set_ready(n, none_in_scope)
+
+        field = self.cmb_field.currentText().strip()
+        self.bar_trace.set_status(f"{apps}  ·  {field or 'no field picked'}")
+        self.bar_trace.set_ready(
+            n == 1 and field,
+            "Needs exactly one app in scope" if n != 1 else "Load fields, then pick one")
+
+        self.bar_diag.set_ready(bool(self.ed_diag_guid.text().strip()),
+                                "Paste the app GUID to test")
 
     def _set_all_exports(self, on):
         for cb in self.checks.values():
@@ -1089,7 +1129,7 @@ class QlikView(QWidget):
         if f:
             lineedit.setText(f)
 
-    def _on_apply(self):
+    def _on_apply(self, dry):
         if self._need_settings():
             return
         if not self.output_dir:
@@ -1115,7 +1155,6 @@ class QlikView(QWidget):
             return
         op = self.cmb_mode.currentText()
         mode = self.MODE_MAP[op]
-        dry = self.chk_dry.isChecked()
         if not dry:
             box = QMessageBox(self)
             box.setWindowTitle("Confirm apply")
@@ -1180,7 +1219,7 @@ class QlikView(QWidget):
 
     # ---------------- QVD field usage report ----------------
     def _on_qvd_usage_text(self, text):
-        self.lineage_panel.setPlainText(text)
+        self.qvd_panel.setPlainText(text)
 
     def _on_qvd_usage(self):
         if self._need_settings():

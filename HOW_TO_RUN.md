@@ -109,17 +109,24 @@ exactly as it was, so you can open the picker to look around without losing a
 selection.
 
 Then open a task from the hub: **Extract metadata · Comparison analysis · Usage &
-leanness · Apply master items · Field lineage · Capacity report · Tenant QVD
-usage · Diagnose visibility**. One task fills the page at a time; **← All
-tasks** in the breadcrumb goes back to the hub. Hover a button or checkbox for
-the full explanation of what it does. The Capacity report scans the whole
+leanness · Apply master items · QVD field usage · Trace a field · Capacity
+report · Tenant QVD usage · Diagnose visibility**. One task fills the page at a
+time; **← All tasks** in the breadcrumb goes back to the hub. Hover a button or
+checkbox for the full explanation of what it does.
+
+Every task page ends in a pinned **action bar**: one main button bottom-right,
+anything secondary to its left, and a status line saying what the run will
+cover. When the main button is greyed out the bar says why — "Needs at least
+two apps in scope", "Choose a measures and/or dimensions CSV" — so you are not
+clicking to find out. The Capacity report scans the whole
 tenant, shows a dashboard (billed % gauge, duplicate-reclaim and per-space
 charts, colour-coded action list) **and** writes `capacity_report_*.xlsx`.
 
-*Apply master items* is the only write path — Dry run is on by default, a backup
-is exported first, and a confirmation dialog appears before any real write.
+*Apply master items* is the only write path. Its bar has **Dry run** and
+**Apply for real** side by side: dry run reports every change and writes
+nothing, and the real one exports a backup first and asks for confirmation.
 
-The **Field lineage** task has two independent tools:
+The two field tasks are independent:
 - **QVD field usage report** — batch mode: for every selected app, scans the
   load script's QVD-sourced LOAD statements and cross-checks every field
   against the live data model, so you can see, per app, which source QVDs
@@ -135,7 +142,7 @@ The **Field lineage** task has two independent tools:
   (source, all the way to the final model) but for Qlik. This is slower: it
   opens every QVD's producing app via Qlik's own lineage graph, one time per
   distinct QVD across the whole scan (not per field).
-- **Field lineage (trace)** — interactive mode: pick one app and one field to
+- **Trace a field** — pick one app and one field to
   see the pipeline that field took *into* this app, optionally extended
   upstream across apps via Qlik's own lineage graph.
 

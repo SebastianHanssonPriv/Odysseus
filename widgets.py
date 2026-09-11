@@ -493,6 +493,51 @@ class Banner(QFrame):
         lay.addWidget(body, 1)
 
 
+# ------------------------------------------------------------------- action bar
+class ActionBar(QFrame):
+    """One primary action per page, bottom-right, always visible.
+
+    REDESIGN_SPEC.md step 5. Replaces the buttons that used to sit mid-page
+    wherever the form happened to end: the bar is pinned below the scrolling
+    page, so the thing you came to click never scrolls away. Secondary actions
+    sit to its left, and the left end carries a status line saying what the run
+    will cover - or why the primary is greyed out, which is better than letting
+    someone click and collect a warning dialog.
+    """
+
+    HEIGHT = 40
+
+    def __init__(self, primary, secondary=(), status=""):
+        super().__init__()
+        self.setObjectName("bar")
+        self.primary = primary
+        primary.setObjectName("accent")
+        primary.setMinimumHeight(self.HEIGHT)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(14, 6, 14, 6)
+        lay.setSpacing(8)
+        self.lbl_status = QLabel(status)
+        self.lbl_status.setObjectName("muted")
+        lay.addWidget(self.lbl_status)
+        lay.addStretch(1)
+        for b in secondary:
+            b.setObjectName("ghost")
+            b.setMinimumHeight(self.HEIGHT)
+            lay.addWidget(b)
+        lay.addWidget(primary)
+        self._base = status
+
+    def set_status(self, text):
+        self._base = text
+        self.lbl_status.setText(text)
+
+    def set_ready(self, ok, why=""):
+        """Enable or disable the primary. `why` replaces the status line while
+        it is disabled, so the bar says what is missing."""
+        self.primary.setEnabled(bool(ok))
+        self.lbl_status.setText(self._base if ok or not why else why)
+
+
 # ------------------------------------------------------------------- task router
 class TaskHub(QWidget):
     """A workspace as a hub of task cards plus one page per task.
@@ -523,9 +568,21 @@ class TaskHub(QWidget):
         lay.addWidget(self.stack, 1)
 
     # ---- building ----
-    def add(self, page, title, desc, badge=""):
+    def add(self, page, title, desc, badge="", bar=None):
+        """Register a built page. `bar` is an ActionBar pinned below it, OUTSIDE
+        the scroll area, so it stays put while the page scrolls."""
         self._tasks.append((title, desc, badge))
-        self.stack.addWidget(_in_scroll(page, no_hscroll=True))
+        body = _in_scroll(page, no_hscroll=True)
+        if bar is None:
+            self.stack.addWidget(body)
+            return
+        wrap = QWidget()
+        lay = QVBoxLayout(wrap)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(body, 1)
+        lay.addWidget(bar)
+        self.stack.addWidget(wrap)
 
     def finish(self):
         """Build the hub and put it at stack index 0, so a task's index is its

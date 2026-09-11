@@ -506,6 +506,7 @@ class MainWindow(QMainWindow):
 
     def _on_scope_changed(self):
         self.qlik_view.scope_bar.refresh()
+        self.qlik_view.refresh_ready()
         self.refresh_status()
 
     def reports_changed(self):

@@ -29,7 +29,8 @@ from PySide6.QtWidgets import (
 from config import Settings
 import reports
 from widgets import (
-    TEAL, WARN, GOOD, BAD, TaskHub, make_card, label, tip, kpi_row, line_chart, ranked_bars,
+    TEAL, WARN, GOOD, BAD, ActionBar, TaskHub, make_card, label, tip, kpi_row, line_chart,
+    ranked_bars,
     colored_table, clear_layout,
 )
 
@@ -146,25 +147,23 @@ class PowerBIView(QWidget):
                                     "over the same range costs nothing.")
         ccl.addWidget(self.chk_skip_existing)
         cl.addWidget(cc)
-        crow = QHBoxLayout()
+        cl.addStretch(1)
         self.btn_collect = QPushButton("Collect range")
-        self.btn_collect.setObjectName("accent")
         tip(self.btn_collect, "Collects the activity events for the UTC days above and appends them "
                               "to the dataset.\n\nNeeds a service principal in the Power BI admin "
                               "group.\n\nTo run this unattended every day, see 'Run it daily' in "
                               "HOW_TO_RUN.md: collect_daily.bat plus Windows Task Scheduler.")
         self.btn_collect.clicked.connect(self._on_collect)
-        crow.addWidget(self.btn_collect)
         self.btn_catchup = QPushButton("Catch up (last 28 days)")
-        self.btn_catchup.setObjectName("ghost")
         tip(self.btn_catchup, "Pulls everything Microsoft still has - the full retention window - "
                               "ignoring the dates above.")
         self.btn_catchup.clicked.connect(self._on_catchup)
-        crow.addWidget(self.btn_catchup)
-        crow.addStretch(1)
-        cl.addLayout(crow)
-        cl.addStretch(1)
-        self.hub.add(tab_c, "Collect activity events", "Microsoft keeps about 28 days. Collect regularly and they accumulate into a dataset that outlives the window.")
+        self.bar_collect = ActionBar(self.btn_collect, secondary=[self.btn_catchup])
+        for de in (self.date_from, self.date_to):
+            de.dateChanged.connect(lambda _d: self._refresh_bars())
+        self.hub.add(tab_c, "Collect activity events", "Microsoft keeps about 28 days. Collect "
+                     "regularly and they accumulate into a dataset that outlives the window.",
+                     bar=self.bar_collect)
 
         # Raw export
         tab_r = QWidget()
@@ -184,17 +183,16 @@ class PowerBIView(QWidget):
         orow.addStretch(1)
         rcl.addLayout(orow)
         rl.addWidget(rc)
-        rrow = QHBoxLayout()
+        rl.addStretch(1)
         self.btn_raw = QPushButton("Export raw events")
-        self.btn_raw.setObjectName("accent")
         tip(self.btn_raw, "Flattens every collected event into a lossless table plus a key "
                                 "map: which columns join to which dimension.")
         self.btn_raw.clicked.connect(self._on_raw)
-        rrow.addWidget(self.btn_raw)
-        rrow.addStretch(1)
-        rl.addLayout(rrow)
-        rl.addStretch(1)
-        self.hub.add(tab_r, "Raw export", "Every collected event, flattened into a lossless table plus a key map.")
+        self.bar_raw = ActionBar(self.btn_raw)
+        for cb in (self.chk_parquet, self.chk_csv):
+            cb.toggled.connect(lambda _on: self._refresh_bars())
+        self.hub.add(tab_r, "Raw export", "Every collected event, flattened into a lossless "
+                     "table plus a key map.", bar=self.bar_raw)
 
         # Usage analytics + dashboard
         tab_a = QWidget()
@@ -204,16 +202,13 @@ class PowerBIView(QWidget):
         acl = QVBoxLayout(ac)
         acl.addWidget(label("USAGE ANALYTICS", "section"))
         acl.addWidget(label("Exact recorded views from the collected activity events.", "muted"))
-        brow = QHBoxLayout()
         self.btn_analytics = QPushButton("Build usage analytics")
-        self.btn_analytics.setObjectName("accent")
         tip(self.btn_analytics, "Build once, then slice by workspace, report and time window.\n\n"
                                       "Time-per-visit and per-page usage are not exposed by the "
                                       "Admin APIs, so they cannot be reported.")
         self.btn_analytics.clicked.connect(self._on_analytics)
-        brow.addWidget(self.btn_analytics)
-        brow.addStretch(1)
-        acl.addLayout(brow)
+        self.bar_analytics = ActionBar(self.btn_analytics,
+                                       status="Reads the collected events - no date range needed")
 
         frow = QHBoxLayout()
         frow.addWidget(label("Workspace", "muted"))
@@ -250,7 +245,8 @@ class PowerBIView(QWidget):
         self.usage_dash.addStretch(1)
         a_scroll.setWidget(holder)
         al.addWidget(a_scroll, 1)
-        self.hub.add(tab_a, "Usage analytics", "Exact recorded views per report, workspace and user, sliceable by time window.")
+        self.hub.add(tab_a, "Usage analytics", "Exact recorded views per report, workspace and "
+                     "user, sliceable by time window.", bar=self.bar_analytics)
 
         # Model lineage
         tab_m = QWidget()
@@ -261,9 +257,7 @@ class PowerBIView(QWidget):
         mcl.addWidget(label("MODEL LINEAGE", "section"))
         mcl.addWidget(label("Semantic model table to warehouse source, direct or through a Gen1 "
                             "dataflow.", "muted"))
-        mrow = QHBoxLayout()
         self.btn_lineage = QPushButton("Scan model lineage")
-        self.btn_lineage.setObjectName("accent")
         tip(self.btn_lineage, 
             "Tenant-wide scan via the Admin Scanner API, no workspace selection needed. Needs the "
             "tenant setting 'Enhance admin APIs responses with DAX and mashup expressions' enabled, "
@@ -281,19 +275,35 @@ class PowerBIView(QWidget):
             "A Sources sheet gives the reverse view: for each resolved source, how many tables "
             "across the tenant pull from it.")
         self.btn_lineage.clicked.connect(self._on_lineage)
-        mrow.addWidget(self.btn_lineage)
-        mrow.addStretch(1)
-        mcl.addLayout(mrow)
+        self.bar_lineage = ActionBar(self.btn_lineage,
+                                     status="Tenant-wide  ·  no workspace selection needed")
         ml.addWidget(mc)
         self.lineage_panel = QPlainTextEdit()
         self.lineage_panel.setReadOnly(True)
         self.lineage_panel.setMinimumHeight(150)
         ml.addWidget(self.lineage_panel, 1)
         self.hub.add(tab_m, "Model lineage", "Semantic model table to warehouse source, direct "
-                     "or through a Gen1 dataflow.", "tenant-wide")
+                     "or through a Gen1 dataflow.", "tenant-wide", bar=self.bar_lineage)
 
         self.hub.finish()
+        self._refresh_bars()
         root.addWidget(self.hub, 1)
+
+    def _refresh_bars(self):
+        """Keep each bar's status and primary honest (REDESIGN_SPEC.md step 5)."""
+        d_from, d_to = self.date_from.date(), self.date_to.date()
+        days = d_from.daysTo(d_to) + 1
+        ok = days > 0
+        self.bar_collect.set_status(
+            f"{days} day{'' if days == 1 else 's'}  ·  "
+            f"{d_from.toString('yyyy-MM-dd')} to {d_to.toString('yyyy-MM-dd')} UTC"
+            if ok else "")
+        self.bar_collect.set_ready(ok, "From is after To - swap the dates")
+
+        fmts = [n for n, cb in (("Parquet", self.chk_parquet), ("CSV", self.chk_csv))
+                if cb.isChecked()]
+        self.bar_raw.set_status("  ·  ".join(fmts))
+        self.bar_raw.set_ready(bool(fmts), "Tick Parquet and/or CSV")
 
     # ================= collect =================
     def _on_catchup(self):

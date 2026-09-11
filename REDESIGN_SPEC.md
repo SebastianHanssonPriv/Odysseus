@@ -106,6 +106,36 @@ or shared. Saving a library also lays out the feature folders and writes a
 README.txt describing them, because the folder is something colleagues open in
 SharePoint.
 
+## Action bars
+
+Each task page ends in an `ActionBar` pinned outside its scroll area, so the
+button you came to press never scrolls away. The status line is not decoration:
+it carries the run's scope, and when the primary is disabled it says what is
+missing instead of letting someone click and collect a warning dialog.
+
+| Task | Needs | Says when it cannot run |
+|---|---|---|
+| Extract metadata | 1+ app, 1+ item type | nothing in scope / tick an item type |
+| Comparison analysis | 2+ apps | needs at least two apps in scope |
+| Usage & leanness | 1+ app | nothing in scope |
+| Apply master items | 1+ app, a CSV | nothing in scope / choose a CSV |
+| QVD field usage | 1+ app | nothing in scope |
+| Trace a field | exactly 1 app, a field | needs exactly one app / pick a field |
+| Capacity report, Tenant QVD usage | nothing | (always ready, tenant-wide) |
+| Diagnose visibility | an app GUID | paste the app GUID to test |
+| Collect activity events | From <= To | From is after To |
+| Raw export | Parquet and/or CSV | tick Parquet and/or CSV |
+| Usage analytics, Model lineage | nothing | (always ready) |
+
+Two consequences worth noting. **Apply master items** lost its "Dry run"
+checkbox: the safe path and the real one are now two buttons side by side, so
+which one you are about to take is visible rather than folded into a tick you
+may have left off. And **Field lineage** became two tasks, *QVD field usage*
+and *Trace a field*, because they need different scopes (any number of apps vs
+exactly one) and so cannot share one primary action. The spec drew them as a
+segmented control on one page; two hub cards get the same result with fewer
+moving parts.
+
 ## Scope
 
 `shell.scope` is a set of app GUIDs and `shell.apps` the loaded list; every
@@ -163,7 +193,11 @@ here is gone for everyone.
       carries only the headline numbers the spec says a diff compares.
 - [~] 4. Log drawer: the panel is collapsed by default. Named run steps still
       to do.
-- [ ] 5. Sticky action bar
+- [x] 5. Sticky action bar: `widgets.ActionBar`, pinned below each task page
+      outside the scroll area. One primary bottom-right at 40px, secondaries to
+      its left, and a status line that says what the run will cover - or why
+      the primary is greyed out. `QlikView.refresh_ready()` and
+      `PowerBIView._refresh_bars()` keep all thirteen honest.
 - [ ] 6. Settings as a rail page
 - [~] Breakpoints: rail width and both hubs' column counts react to window
       width. The `< 1040` rule is written but still not reachable; see the
