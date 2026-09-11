@@ -625,7 +625,7 @@ class QlikView(QWidget):
             QMessageBox.warning(self, "Select apps", "Select one or more apps in the list to export.")
             return
         self.btn_run.setEnabled(False)
-        self.shell.busy_begin("Exporting metadata")
+        self.shell.busy_begin("Exporting metadata", ["Export each app", "Finish"])
         self.log(f"Exporting {len(targets)} app(s) ...")
         flags = tuple(self.checks[k].isChecked()
                       for k in ("measures", "dimensions", "variables", "script", "visuals"))
@@ -638,10 +638,13 @@ class QlikView(QWidget):
         t0 = time.time()
         done = []
         try:
-            for a in targets:
+            self.shell.run_step(0)
+            for i, a in enumerate(targets):
                 if self.shell.cancel_requested():
                     self.log("Export cancelled.")
                     break
+                self.shell.run_progress(i, len(targets), "apps exported")
+                self.shell.run_detail(a.get("name", a["guid"]))
                 exporter = core.QlikExporter(tenant, key, a["guid"], out_dir, self.shell.sig_log.emit)
                 try:
                     exporter.run(*flags)
@@ -650,6 +653,8 @@ class QlikView(QWidget):
                     done.append(a.get("name", a["guid"]))
                 finally:
                     exporter.close()
+            self.shell.run_progress(len(done), len(targets), "apps exported")
+            self.shell.run_finish(f"{len(done)} of {len(targets)} apps")
             self.log("All exports finished.")
             if done:
                 # One workbook per app, so the record points at the folder the
@@ -673,7 +678,8 @@ class QlikView(QWidget):
             QMessageBox.warning(self, "Select apps", "Select at least 2 apps in the list to compare.")
             return
         self.btn_analyze.setEnabled(False)
-        self.shell.busy_begin("Analyzing consistency")
+        self.shell.busy_begin("Analyzing consistency",
+                              ["Read master items", "Compare", "Write report"])
         self.log(f"Analyzing {len(targets)} app(s) for measure/dimension consistency ...")
         threading.Thread(target=self._analyze_worker,
                          args=(self.tenant, self.api_key, self._feature_dir("comparison_analysis"),
@@ -684,10 +690,13 @@ class QlikView(QWidget):
         t0 = time.time()
         measures, dims = [], []
         try:
-            for a in targets:
+            self.shell.run_step(0)
+            for i, a in enumerate(targets):
                 if self.shell.cancel_requested():
                     self.log("Consistency scan cancelled.")
                     break
+                self.shell.run_progress(i, len(targets), "apps read")
+                self.shell.run_detail(a.get("name", a["guid"]))
                 exp = core.QlikExporter(tenant, key, a["guid"], out_dir, self.shell.sig_log.emit)
                 try:
                     exp.connect()
@@ -716,13 +725,17 @@ class QlikView(QWidget):
             if not measures and not dims:
                 self.log("No master measures or dimensions found in the selected apps.")
                 return
+            self.shell.run_progress(len(targets), len(targets), "apps read")
+            self.shell.run_step(1, f"{len(measures) + len(dims)} master items")
             results = core.analyze_consistency(measures, dims)
             self.sig_consistency_result.emit({
                 "results": results,
                 "n_measures": len(measures), "n_dims": len(dims),
                 "n_apps": len({m["app"] for m in measures} | {d["app"] for d in dims}),
             })
+            self.shell.run_step(2)
             out_path = core.write_consistency_report(results, measures, dims, out_dir, self.shell.sig_log.emit)
+            self.shell.run_finish()
             self.log("Analysis complete: "
                      f"{len(results['measure_name_conflicts'])} measure name-conflicts, "
                      f"{len(results['measure_redundancy'])} measure redundancy groups, "
@@ -756,7 +769,7 @@ class QlikView(QWidget):
             QMessageBox.warning(self, "Select apps", "Select one or more apps in the list to analyze.")
             return
         self.btn_usage.setEnabled(False)
-        self.shell.busy_begin("Analyzing usage")
+        self.shell.busy_begin("Analyzing usage", ["Analyse each app", "Finish"])
         self.log(f"Analyzing usage for {len(targets)} app(s) ...")
         threading.Thread(target=self._usage_worker,
                          args=(self.tenant, self.api_key, self._feature_dir("usage_analysis"),
@@ -767,10 +780,13 @@ class QlikView(QWidget):
         t0 = time.time()
         app_results = []
         try:
-            for a in targets:
+            self.shell.run_step(0)
+            for i, a in enumerate(targets):
                 if self.shell.cancel_requested():
                     self.log("Usage scan cancelled.")
                     break
+                self.shell.run_progress(i, len(targets), "apps analysed")
+                self.shell.run_detail(a.get("name", a["guid"]))
                 exp = core.QlikExporter(tenant, key, a["guid"], out_dir, self.shell.sig_log.emit)
                 try:
                     exp.connect()
@@ -797,6 +813,8 @@ class QlikView(QWidget):
                     self.log(f"ERROR analyzing {a.get('name', a['guid'])}: {scrub(key, e)}")
                 finally:
                     exp.close()
+            self.shell.run_progress(len(app_results), len(targets), "apps analysed")
+            self.shell.run_finish(f"{len(app_results)} of {len(targets)} apps")
             self.log("Usage analysis finished.")
             if app_results:
                 self.sig_usage_result_q.emit(app_results)
@@ -820,7 +838,8 @@ class QlikView(QWidget):
             QMessageBox.warning(self, "Missing settings", "Set an output folder in Settings.")
             return
         self.btn_capacity.setEnabled(False)
-        self.shell.busy_begin("Scanning tenant capacity")
+        self.shell.busy_begin("Scanning tenant capacity",
+                              ["Fetch capacity", "Write report"])
         with_orphans = self.chk_cap_orphans.isChecked()
         self.log("Scanning tenant capacity (App reload + Import)"
                  + (" with orphan detection - this can take a while ..." if with_orphans else " ..."))
@@ -832,6 +851,7 @@ class QlikView(QWidget):
     def _capacity_worker(self, tenant, key, out_dir, with_orphans):
         t0 = time.time()
         try:
+            self.shell.run_step(0)
             res = qcap.fetch_two_capacities(tenant, key, log=self.shell.sig_log.emit,
                                             with_orphans=with_orphans,
                                             should_cancel=self.shell.cancel_requested)
@@ -853,7 +873,9 @@ class QlikView(QWidget):
                 self.log(f"  Top duplicated report: '{t['base_name']}' - {t.get('count')} copies "
                          f"across {t.get('space_count')} spaces; "
                          f"{qcap.format_bytes(t.get('dedupe_savings_bytes'))} reclaimable if consolidated.")
+            self.shell.run_step(1)
             out_path = qcap.write_capacity_report(res, out_dir, self.shell.sig_log.emit)
+            self.shell.run_finish()
             self.log("Capacity report finished.")
             red2 = red or {}
             inv = (res.get("app_reload") or {}).get("inventory", {}) or {}
@@ -1174,7 +1196,8 @@ class QlikView(QWidget):
             if box.clickedButton() is not apply_btn:
                 return
         self.btn_apply.setEnabled(False)
-        self.shell.busy_begin("Dry run" if dry else "Applying master items")
+        self.shell.busy_begin("Dry run" if dry else "Applying master items",
+                              ["Back up current items", "Apply to each app"])
         self.log(("DRY RUN - " if dry else "") + f"Applying to {len(targets)} app(s) [{op}] ...")
         threading.Thread(target=self._apply_worker,
                          args=(self.tenant, self.api_key, self._feature_dir("apply_master_items"),
@@ -1232,7 +1255,8 @@ class QlikView(QWidget):
             QMessageBox.warning(self, "Select apps", "Select one or more apps in the list to scan.")
             return
         self.btn_qvd_usage.setEnabled(False)
-        self.shell.busy_begin("Scanning QVD field usage")
+        self.shell.busy_begin("Scanning QVD field usage",
+                              ["Scan each app", "Write report"])
         self.log(f"Scanning QVD field usage for {len(targets)} app(s) ...")
         threading.Thread(target=self._qvd_usage_worker,
                          args=(self.tenant, self.api_key, self._feature_dir("field_lineage"), targets,
@@ -1279,10 +1303,13 @@ class QlikView(QWidget):
         app_rows = []
         chain_cache = {}  # qvd_file -> resolved chain dict, shared across all apps in this run
         try:
-            for a in targets:
+            self.shell.run_step(0)
+            for i, a in enumerate(targets):
                 if self.shell.cancel_requested():
                     self.log("QVD field usage scan cancelled.")
                     break
+                self.shell.run_progress(i, len(targets), "apps scanned")
+                self.shell.run_detail(a.get("name", a["guid"]))
                 exp = core.QlikExporter(tenant, key, a["guid"], out_dir, self.shell.sig_log.emit)
                 try:
                     exp.connect()
@@ -1307,10 +1334,13 @@ class QlikView(QWidget):
             if not app_rows:
                 self.log("No apps scanned.")
                 return
+            self.shell.run_progress(len(app_rows), len(targets), "apps scanned")
+            self.shell.run_step(1, f"{len(app_rows)} of {len(targets)} apps")
             text = core.render_qvd_field_usage_text(app_rows)
             self.sig_qvd_usage_done.emit(text)
             out_path = core.write_qvd_usage_report(app_rows, out_dir, self.shell.sig_log.emit)
             self.log(f"QVD field usage report -> {os.path.basename(out_path)}")
+            self.shell.run_finish()
             rows = [r for a in app_rows for r in a["rows"]]
             confirmed = sum(1 for r in rows if r["status"] in core.QVD_CONFIRMED_STATUSES)
             not_found = sum(1 for r in rows if r["status"] == "not_found_in_final_model")
@@ -1336,7 +1366,8 @@ class QlikView(QWidget):
             QMessageBox.warning(self, "Missing settings", "Set an output folder in Settings.")
             return
         self.btn_tenant_usage.setEnabled(False)
-        self.shell.busy_begin("Scanning tenant QVD & field usage")
+        self.shell.busy_begin("Scanning tenant QVD & field usage",
+                              ["Walk published apps", "Cross-reference QVDs", "Write report"])
         self.log("Scanning tenant QVD & field usage (published apps only) ...")
         threading.Thread(target=self._tenant_usage_worker,
                          args=(self.tenant, self.api_key, self._feature_dir("tenant_usage")),
@@ -1371,7 +1402,9 @@ class QlikView(QWidget):
 
         try:
             self.log("Listing published apps ...")
+            self.shell.run_step(0)
             root_apps = core.list_published_apps(tenant, key)
+            self.shell.run_detail(f"{len(root_apps)} published apps to walk")
             self.log(f"  {len(root_apps)} published app(s) found - tracing full lineage "
                      "(this can take a while) ...")
             try:
@@ -1399,13 +1432,16 @@ class QlikView(QWidget):
             if not app_rows:
                 self.log("No published apps scanned.")
                 return
+            self.shell.run_step(1, f"{len(app_rows)} apps walked")
             qvd_ref_rows = core.cross_reference_qvd_inventory(qvd_inventory, app_rows)
+            self.shell.run_step(2, f"{len(qvd_ref_rows)} QVDs")
             text = core.render_tenant_qvd_usage_text(app_rows, qvd_ref_rows)
             self.sig_tenant_usage_done.emit(text)
             out_path = core.write_tenant_qvd_usage_report(app_rows, qvd_ref_rows, out_dir,
                                                            self.shell.sig_log.emit,
                                                            space_lookup=space_lookup)
             self.log(f"Tenant QVD & field usage report -> {os.path.basename(out_path)}")
+            self.shell.run_finish()
             rows = [r for a in app_rows for r in a["rows"]]
             self._record(out_path, "tenant_usage", "Tenant QVD & field usage",
                          scope=f"{len(app_rows)} published apps", started=t0, headline=[

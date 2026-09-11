@@ -22,18 +22,19 @@ import sharepoint
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QIcon, QPixmap, QFont
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QLineEdit, QPushButton, QComboBox, QDialog, QFileDialog, QMessageBox,
-    QFrame, QButtonGroup, QStackedWidget, QPlainTextEdit, QProgressBar,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QMessageBox,
+    QFrame, QButtonGroup, QStackedWidget, QPlainTextEdit,
 )
 
 from widgets import (
-    STYLE, TEAL, TEAL_DARK, RAIL, RAIL_FG, FONT_HEAD,
-    make_card, label, tip, load_fonts, app_font,
+    STYLE, RAIL, RAIL_FG, FONT_HEAD, RunCard,
+    make_card, label, load_fonts, app_font,
 )
 from qlik_view import QlikView
 from powerbi_view import PowerBIView
 from reports_view import ReportsView
+from settings_view import SettingsView, PBI_AUTH_MODES
 from home_view import HomeView
 
 SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".bufab_bi_studio.json")
@@ -53,204 +54,11 @@ NAV_WIDTH_WIDE = 220
 CONTENT_MAX_WIDTH = 1600
 
 
-# ============================================================
-#  Unified settings dialog
-# ============================================================
-class SettingsDialog(QDialog):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.setWindowTitle("Settings")
-        self.setModal(True)
-        self.setMinimumWidth(520)
-        if os.path.exists(ICON_PATH):
-            self.setWindowIcon(QIcon(ICON_PATH))
-        self._main = parent
-
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 16, 16, 16)
-        lay.setSpacing(10)
-
-        # --- Qlik ---
-        lay.addWidget(self._sec("QLIK CLOUD"))
-        qg = QGridLayout()
-        qg.setHorizontalSpacing(10)
-        qg.setVerticalSpacing(8)
-        qg.addWidget(self._mut("Tenant (host)"), 0, 0)
-        self.ed_q_tenant = QLineEdit(parent.tenant)
-        self.ed_q_tenant.setPlaceholderText("yourtenant.eu.qlikcloud.com")
-        qg.addWidget(self.ed_q_tenant, 0, 1, 1, 2)
-        qg.addWidget(self._mut("API key"), 1, 0)
-        self.ed_q_key = QLineEdit(parent.api_key)
-        self.ed_q_key.setEchoMode(QLineEdit.Password)
-        qg.addWidget(self.ed_q_key, 1, 1, 1, 2)
-        qg.setColumnStretch(1, 1)
-        lay.addLayout(qg)
-
-        # --- Power BI ---
-        lay.addWidget(self._sec("POWER BI"))
-        pg = QGridLayout()
-        pg.setHorizontalSpacing(10)
-        pg.setVerticalSpacing(8)
-        p = parent.pbi
-        pg.addWidget(self._mut("Tenant ID"), 0, 0)
-        self.ed_p_tenant = QLineEdit(p.get("tenant_id", ""))
-        pg.addWidget(self.ed_p_tenant, 0, 1, 1, 2)
-        pg.addWidget(self._mut("Client ID"), 1, 0)
-        self.ed_p_client = QLineEdit(p.get("client_id", ""))
-        pg.addWidget(self.ed_p_client, 1, 1, 1, 2)
-        pg.addWidget(self._mut("Auth mode"), 2, 0)
-        self.cmb_p_mode = QComboBox()
-        self.cmb_p_mode.addItems(PBI_AUTH_MODES)
-        mode = p.get("auth_mode", PBI_AUTH_MODES[0])
-        if mode in PBI_AUTH_MODES:
-            self.cmb_p_mode.setCurrentText(mode)
-        self.cmb_p_mode.currentTextChanged.connect(self._toggle_mode)
-        pg.addWidget(self.cmb_p_mode, 2, 1, 1, 2)
-        pg.addWidget(self._mut("Client secret"), 3, 0)
-        self.ed_p_secret = QLineEdit(parent.pbi_secret)
-        self.ed_p_secret.setEchoMode(QLineEdit.Password)
-        self.ed_p_secret.setPlaceholderText("held in memory only - re-enter each session")
-        pg.addWidget(self.ed_p_secret, 3, 1, 1, 2)
-        pg.addWidget(self._mut("Key Vault URL"), 4, 0)
-        self.ed_p_kv = QLineEdit(p.get("key_vault_url", ""))
-        pg.addWidget(self.ed_p_kv, 4, 1, 1, 2)
-        pg.addWidget(self._mut("Key Vault secret name"), 5, 0)
-        self.ed_p_kvsecret = QLineEdit(p.get("key_vault_secret_name", ""))
-        pg.addWidget(self.ed_p_kvsecret, 5, 1, 1, 2)
-        pg.setColumnStretch(1, 1)
-        lay.addLayout(pg)
-
-        # --- one library folder for everything both products write ---
-        lay.addWidget(self._sec("LIBRARY FOLDER"))
-        og = QGridLayout()
-        og.addWidget(self._mut("SharePoint URL"), 0, 0)
-        self.ed_library_url = QLineEdit(parent.library_url)
-        self.ed_library_url.setPlaceholderText(
-            "paste the library's address from the browser, then click Find")
-        tip(self.ed_library_url,
-            "Paste the SharePoint address of the library, exactly as it appears in the "
-            "browser, and click Find synced folder.\n\nStudio writes ordinary files, so it "
-            "needs the local folder the OneDrive client syncs that library to - not the "
-            "https:// address. That local path is different on every machine, which is why "
-            "this looks it up instead of asking you to type it.\n\nThe library has to be "
-            "synced first: open it in SharePoint and click Sync.")
-        og.addWidget(self.ed_library_url, 0, 1)
-        b_find = QPushButton("Find synced folder")
-        b_find.setObjectName("ghost")
-        b_find.clicked.connect(self._find_synced)
-        og.addWidget(b_find, 0, 2)
-        og.addWidget(self._mut("Library folder"), 1, 0)
-        self.ed_library = QLineEdit(parent.output_dir)
-        self.ed_library.setPlaceholderText(r"e.g. C:\Users\you\Bufab\BI Governance - Library")
-        tip(self.ed_library, "Point this at a folder that OneDrive or the SharePoint client syncs "
-                             "and the library is shared: everyone with access to that library sees "
-                             "every report, opens the workbooks in Excel or the browser, and needs "
-                             "no copy of Studio.\n\nA plain local folder works too - it is then "
-                             "just your own library.")
-        og.addWidget(self.ed_library, 1, 1)
-        browse = QPushButton("Browse...")
-        browse.setObjectName("ghost")
-        browse.clicked.connect(lambda: self._browse(self.ed_library))
-        og.addWidget(browse, 1, 2)
-        og.setColumnStretch(1, 1)
-        lay.addLayout(og)
-        note_out = self._mut("Everything both products write goes here, each feature in its own "
-                             "subfolder: Qlik\\capacity_report, Qlik\\field_lineage, "
-                             "powerbi_data\\analytics and so on. Put the folder on a synced "
-                             "SharePoint or OneDrive path and it doubles as the shared library.")
-        note_out.setWordWrap(True)
-        note_out.setStyleSheet("font-size: 8pt;")
-        lay.addWidget(note_out)
-
-        note = self._mut("Secrets (Qlik API key, Power BI client secret) are never saved to disk - "
-                         "re-enter them each session. Everything else is remembered.")
-        note.setWordWrap(True)
-        note.setStyleSheet("font-size: 8pt;")
-        lay.addWidget(note)
-
-        btns = QHBoxLayout()
-        btns.addStretch(1)
-        b_close = QPushButton("Close")
-        b_close.setObjectName("ghost")
-        b_close.clicked.connect(self.reject)
-        b_save = QPushButton("Save")
-        b_save.setObjectName("accent")
-        b_save.clicked.connect(self._on_save)
-        btns.addWidget(b_close)
-        btns.addWidget(b_save)
-        lay.addLayout(btns)
-        self._toggle_mode(self.cmb_p_mode.currentText())
-
-    @staticmethod
-    def _sec(text):
-        return label(text, "section")
-
-    @staticmethod
-    def _mut(text):
-        return label(text, "muted")
-
-    def _toggle_mode(self, mode):
-        # show only the credential fields the chosen mode needs
-        secret_mode = mode == "Client secret (in-memory)"
-        vault_mode = mode == "Key Vault"
-        self.ed_p_secret.setEnabled(secret_mode)
-        self.ed_p_kv.setEnabled(vault_mode)
-        self.ed_p_kvsecret.setEnabled(vault_mode)
-
-    def _find_synced(self):
-        """Turn the pasted SharePoint URL into the local synced folder."""
-        url = self.ed_library_url.text().strip()
-        info = sharepoint.parse_library_url(url)
-        if not info:
-            QMessageBox.warning(self, "SharePoint URL",
-                                "That does not look like a SharePoint library address.\n\n"
-                                "Open the library in the browser and copy the address bar, or "
-                                "use Copy link on the folder.")
-            return
-        found = sharepoint.resolve(url)
-        if found:
-            self.ed_library.setText(found)
-            QMessageBox.information(self, "Found it",
-                                    f"{sharepoint.describe(url)}\n\nis synced to:\n{found}")
-            return
-        chain = "\\".join(info["folders"])
-        QMessageBox.warning(
-            self, "Not synced on this PC",
-            f"The library was recognised:\n  {sharepoint.describe(url)}\n\n"
-            "but no synced copy of it was found on this PC.\n\n"
-            "Open the library in SharePoint and click Sync, wait for it to finish, then "
-            "click Find synced folder again.\n\nOnce synced it appears under your user "
-            f"folder, ending in:\n  ...\\{chain}\n\nYou can also point Browse at it "
-            "directly.")
-
-    def _browse(self, lineedit):
-        d = QFileDialog.getExistingDirectory(self, "Choose the library folder",
-                                             lineedit.text() or os.path.expanduser("~"))
-        if d:
-            lineedit.setText(d)
-
-    def _on_save(self):
-        pbi = {
-            "tenant_id": self.ed_p_tenant.text().strip(),
-            "client_id": self.ed_p_client.text().strip(),
-            "auth_mode": self.cmb_p_mode.currentText(),
-            "key_vault_url": self.ed_p_kv.text().strip(),
-            "key_vault_secret_name": self.ed_p_kvsecret.text().strip(),
-        }
-        self._main.apply_settings(
-            self.ed_q_tenant.text().strip(), self.ed_q_key.text(),
-            self.ed_library.text().strip(), self.ed_library_url.text().strip(),
-            pbi, self.ed_p_secret.text())
-        self.accept()
-
-
-# ============================================================
-#  Main shell
-# ============================================================
 class MainWindow(QMainWindow):
     sig_log = Signal(str)
     sig_reports_changed = Signal()
     sig_scope_changed = Signal()
+    sig_run = Signal(object)         # ("step"|"progress"|"detail"|"finish", payload)
 
     def __init__(self):
         super().__init__()
@@ -272,6 +80,7 @@ class MainWindow(QMainWindow):
         self.pbi = {"tenant_id": "", "client_id": "", "auth_mode": PBI_AUTH_MODES[0],
                     "key_vault_url": "", "key_vault_secret_name": ""}
         self.pbi_secret = ""         # in memory only
+        self.missing_fonts = []      # filled by main(), shown on the About page
         self.last_capacity = None
         self.last_pbi_usage = None
         self.last_capacity_at = ""
@@ -289,6 +98,7 @@ class MainWindow(QMainWindow):
         self.sig_log.connect(self._append_log)
         self.sig_reports_changed.connect(self._on_reports_changed)
         self.sig_scope_changed.connect(self._on_scope_changed)
+        self.sig_run.connect(self._on_run_event)
 
         self._build()
         self._load_settings()
@@ -324,28 +134,13 @@ class MainWindow(QMainWindow):
         main.addWidget(content, 1000)
         main.addStretch(1)
 
-        # status + busy row
-        top = QHBoxLayout()
+        # status line, then the run card (hidden until something runs)
         self.lbl_status = QLabel("")
         self.lbl_status.setObjectName("muted")
         self.lbl_status.setWordWrap(True)
-        top.addWidget(self.lbl_status, 1)
-        self.busy_lbl = QLabel("")
-        self.busy_lbl.setObjectName("muted")
-        self.busy_lbl.setVisible(False)
-        top.addWidget(self.busy_lbl, 0, Qt.AlignVCenter)
-        self.busy_bar = QProgressBar()
-        self.busy_bar.setRange(0, 0)
-        self.busy_bar.setTextVisible(False)
-        self.busy_bar.setFixedWidth(150)
-        self.busy_bar.setVisible(False)
-        top.addWidget(self.busy_bar, 0, Qt.AlignVCenter)
-        self.btn_cancel = QPushButton("Cancel")
-        self.btn_cancel.setObjectName("ghost")
-        self.btn_cancel.setVisible(False)
-        self.btn_cancel.clicked.connect(self._on_cancel)
-        top.addWidget(self.btn_cancel, 0, Qt.AlignVCenter)
-        cl.addLayout(top)
+        cl.addWidget(self.lbl_status)
+        self.run_card = RunCard(self._on_cancel)
+        cl.addWidget(self.run_card)
 
         # stacked workspaces
         self.stack = QStackedWidget()
@@ -355,8 +150,10 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.home_view)       # 0
         self.stack.addWidget(self.qlik_view)       # 1
         self.reports_view = ReportsView(self)
+        self.settings_view = SettingsView(self)
         self.stack.addWidget(self.powerbi_view)    # 2
         self.stack.addWidget(self.reports_view)    # 3
+        self.stack.addWidget(self.settings_view)   # 4
         cl.addWidget(self.stack, 1)
 
         cl.addWidget(self._build_log_card())
@@ -416,7 +213,10 @@ class MainWindow(QMainWindow):
         lay.addStretch(1)
         b_set = QPushButton("  Settings")
         b_set.setObjectName("nav")
-        b_set.clicked.connect(self._open_settings)
+        b_set.setCheckable(True)
+        b_set.clicked.connect(lambda: self.go_to("settings"))
+        self._nav_group.addButton(b_set)
+        self._nav_buttons["settings"] = b_set
         lay.addWidget(b_set)
         return nav
 
@@ -468,11 +268,15 @@ class MainWindow(QMainWindow):
 
     # ---------------- navigation ----------------
     def go_to(self, key):
-        idx = {"home": 0, "qlik": 1, "powerbi": 2, "reports": 3}.get(key, 0)
+        idx = {"home": 0, "qlik": 1, "powerbi": 2, "reports": 3, "settings": 4}.get(key, 0)
         self.stack.setCurrentIndex(idx)
         btn = self._nav_buttons.get(key)
         if btn and not btn.isChecked():
             btn.setChecked(True)
+        if key == "settings":
+            # Re-read the shell each time rather than trusting the copy the
+            # fields were filled with when the page was built.
+            self.settings_view.reload()
         if key == "reports":
             # The library is a folder, so it can change without this app doing
             # anything - a colleague's run, a file deleted in Explorer. Re-read
@@ -539,21 +343,22 @@ class MainWindow(QMainWindow):
             self.log_box.setVisible(True)
             self.btn_toggle_log.setText("Hide log")
 
-    # ---------------- busy indicator (GUI-thread; reference counted) ----------------
-    def busy_begin(self, msg):
+    # ---------------- the running run (REDESIGN_SPEC.md step 4) ----------------
+    def busy_begin(self, msg, steps=()):
+        """Start (or join) a run. Called from the GUI thread by each task's
+        handler before it starts its worker. `steps` are the run's named
+        stages; a run that passes none still gets a title, a clock, a live
+        detail line and Cancel."""
         self._busy_ops += 1
         self._busy_msg = msg
         if self._busy_ops == 1:
             self._cancel.clear()
             self._busy_secs = 0
-            self.busy_bar.setVisible(True)
-            self.busy_lbl.setVisible(True)
-            self.btn_cancel.setText("Cancel")
-            self.btn_cancel.setEnabled(True)
-            self.btn_cancel.setVisible(True)
+            self.run_card.begin(msg, steps)
             self._busy_render()
             self._busy_timer.start()
         else:
+            self.run_card.set_title(msg)
             self._busy_render()
 
     def busy_end(self):
@@ -561,14 +366,36 @@ class MainWindow(QMainWindow):
             self._busy_ops -= 1
         if self._busy_ops == 0:
             self._busy_timer.stop()
-            self.busy_bar.setVisible(False)
-            self.busy_lbl.setVisible(False)
-            self.btn_cancel.setVisible(False)
+            self.run_card.end()
+
+    # Workers call these from their own threads, so each one only emits.
+    def run_step(self, index, result=""):
+        self.sig_run.emit(("step", (index, result)))
+
+    def run_progress(self, done, total, noun=""):
+        self.sig_run.emit(("progress", (done, total, noun)))
+
+    def run_detail(self, text):
+        self.sig_run.emit(("detail", str(text)))
+
+    def run_finish(self, result=""):
+        self.sig_run.emit(("finish", result))
+
+    def _on_run_event(self, event):
+        """GUI thread. One dispatcher rather than four signals."""
+        kind, payload = event
+        if kind == "step":
+            self.run_card.step(*payload)
+        elif kind == "progress":
+            self.run_card.set_progress(*payload)
+        elif kind == "detail":
+            self.run_card.set_detail(payload)
+        elif kind == "finish":
+            self.run_card.finish_step(payload)
 
     def _on_cancel(self):
         self._cancel.set()
-        self.btn_cancel.setEnabled(False)
-        self.btn_cancel.setText("Cancelling…")
+        self.run_card.cancelling()
         self.log("Cancel requested - stopping after the current step ...")
         self._busy_render()
 
@@ -581,7 +408,7 @@ class MainWindow(QMainWindow):
         h, m = divmod(m, 60)
         clock = f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:d}:{s:02d}"
         tail = "  ·  cancelling…" if self._cancel.is_set() else ""
-        self.busy_lbl.setText(f"{self._busy_msg}  ·  working {clock}{tail}")
+        self.run_card.set_clock(f"working {clock}{tail}")
 
     def _busy_tick(self):
         self._busy_secs += 1
@@ -607,7 +434,11 @@ class MainWindow(QMainWindow):
 
     # ---------------- settings ----------------
     def _open_settings(self):
-        SettingsDialog(self).exec()
+        """Kept as the name other views call to send the user to settings."""
+        self.go_to("settings")
+
+    def settings_path(self):
+        return SETTINGS_FILE
 
     def apply_settings(self, qlik_tenant, qlik_key, output_dir, library_url, pbi, pbi_secret):
         self.tenant = qlik_tenant
@@ -687,6 +518,7 @@ def main():
     if os.path.exists(ICON_PATH):
         app.setWindowIcon(QIcon(ICON_PATH))
     win = MainWindow()
+    win.missing_fonts = list(missing_fonts)
     if missing_fonts:
         win.log("Barlow fonts not found (" + ", ".join(missing_fonts) +
                 ") - falling back to Segoe UI. Drop the .ttf files in fonts\\ to "

@@ -106,6 +106,15 @@ or shared. Saving a library also lays out the feature folders and writes a
 README.txt describing them, because the folder is something colleagues open in
 SharePoint.
 
+## The running run
+
+`widgets.RunCard` lives on the shell, above the workspace stack, hidden until
+something runs. `busy_begin(title, steps)` starts it from the GUI thread;
+workers then call `run_step`, `run_progress`, `run_detail` and `run_finish`,
+all of which only emit `sig_run` because they are called from worker threads.
+The meter stays indeterminate until a worker reports a total, since a
+made-up percentage is worse than an honest spinner.
+
 ## Action bars
 
 Each task page ends in an `ActionBar` pinned outside its scroll area, so the
@@ -191,14 +200,24 @@ here is gone for everyone.
       same type (`reports_view.py`). Home shows the three newest. No separate
       report viewer: the detail already lives in the workbook, and the manifest
       carries only the headline numbers the spec says a diff compares.
-- [~] 4. Log drawer: the panel is collapsed by default. Named run steps still
-      to do.
+- [x] 4. Log drawer + named run steps: the log panel is collapsed by default,
+      and `widgets.RunCard` replaced the indeterminate bar with what is
+      running, how long it has been going, a determinate meter once a worker
+      reports counts, and the run's named steps with each one's result. One
+      card on the shell, because the design's own note says you can leave the
+      page and the job keeps running.
 - [x] 5. Sticky action bar: `widgets.ActionBar`, pinned below each task page
       outside the scroll area. One primary bottom-right at 40px, secondaries to
       its left, and a status line that says what the run will cover - or why
       the primary is greyed out. `QlikView.refresh_ready()` and
       `PowerBIView._refresh_bars()` keep all thirteen honest.
-- [ ] 6. Settings as a rail page
+- [x] 6. Settings as a rail page: `settings_view.py`, a rail destination with
+      a Connections / Library / About sub-nav and a Save bar. Only the
+      credential fields the chosen Power BI auth mode needs are shown, and the
+      Qlik key has a Test button. The modal is gone. The spec also drew
+      Schedules and Appearance; neither exists, because scheduling is Windows
+      Task Scheduler (nothing for Studio to configure) and there is no theme
+      to switch.
 - [~] Breakpoints: rail width and both hubs' column counts react to window
       width. The `< 1040` rule is written but still not reachable; see the
       measured minimum window width below.

@@ -8,9 +8,14 @@ One desktop app over **two products**:
 - **Power BI** — collect activity events, export the raw event log, and build
   usage analytics with an in-app **Usage dashboard**.
 
-A left nav rail switches **Home · Qlik · Power BI**; the header, status line,
-busy indicator, LOG and library folder are shared. **Settings** is at the bottom
-of the nav rail.
+A left nav rail switches **Home · Qlik · Power BI · Reports · Settings**; the
+header, status line, run card, LOG and library folder are shared.
+
+While something is running, a **run card** appears above the workspace: what is
+running, how long it has been going, a progress bar once the worker knows its
+total, and the run's named steps with the result of each as it finishes. It
+lives on the shell, so you can leave the page and the job keeps going. The LOG
+panel stays collapsed until you want it.
 
 ---
 
@@ -37,10 +42,23 @@ pip install -r requirements.txt
 ```bat
 python studio_app.py
 ```
-Open **Settings** (bottom of the nav rail) and fill in what you need:
-- **Qlik:** Tenant host + API key.
-- **Power BI:** Tenant ID, Client ID, an Auth mode, and either the client secret
-  or the Key Vault URL + secret name.
+Open **Settings** (bottom of the nav rail; it is a page, not a dialog) and fill
+in what you need. It has three sections:
+
+**Connections**
+- **Qlik:** Tenant host + API key, with a **Test** button that asks the tenant
+  for its space list — a cheap read-only check that the host and key work
+  before you start a scan.
+- **Power BI:** Tenant ID, Client ID, an Auth mode. Only the credential fields
+  that mode needs are shown: a client secret for in-memory mode, the Key Vault
+  URL + secret name for Key Vault, nothing at all for managed identity.
+
+**About** reports where the settings file is, which library is configured, and
+whether the Barlow fonts were found.
+
+Scheduling and appearance are deliberately not settings: unattended collection
+is a Windows Scheduled Task (see "Run it daily" below) and the look is fixed.
+
 - **Library folder:** one folder for everything both products write. Every
   feature still gets its own subfolder, so nothing lands loose in one pile:
   - Qlik → `<library>\Qlik\metadata_export\`, `\comparison_analysis\`,

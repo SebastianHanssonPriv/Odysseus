@@ -329,7 +329,7 @@ class PowerBIView(QWidget):
         ndays = (d_to - d_from).days + 1
         self.btn_collect.setEnabled(False)
         self.btn_catchup.setEnabled(False)
-        self.shell.busy_begin("Collecting Power BI activity")
+        self.shell.busy_begin("Collecting Power BI activity", ["Pull each day"])
         self.log(f"Collecting Power BI activity events {d_from.isoformat()} .. {d_to.isoformat()} "
                  f"({ndays} day(s), UTC) ...")
         threading.Thread(target=self._collect_worker,
@@ -351,7 +351,12 @@ class PowerBIView(QWidget):
             day = d_from
             total_events = days_pulled = days_skipped = 0
             cancelled = False
+            span = d_from.toordinal(), d_to.toordinal()
+            n_days = span[1] - span[0] + 1
+            self.shell.run_step(0)
             while day <= d_to:
+                self.shell.run_progress(day.toordinal() - span[0], n_days, "days")
+                self.shell.run_detail(day.isoformat())
                 if self.shell.cancel_requested():
                     cancelled = True
                     break
@@ -371,6 +376,8 @@ class PowerBIView(QWidget):
                 self.log(f"  {day.isoformat()}: {count} events -> {out_file.name}")
                 day += datetime.timedelta(days=1)
 
+            self.shell.run_progress(n_days, n_days, "days")
+            self.shell.run_finish(f"{days_pulled} pulled, {days_skipped} already present")
             tail = "CANCELLED" if cancelled else "done"
             self.log(f"Collect {tail}: {days_pulled} day(s) pulled ({total_events} events), "
                      f"{days_skipped} already present.")
@@ -397,7 +404,7 @@ class PowerBIView(QWidget):
             QMessageBox.warning(self, "Nothing selected", "Tick Parquet and/or CSV.")
             return
         self.btn_raw.setEnabled(False)
-        self.shell.busy_begin("Exporting raw events")
+        self.shell.busy_begin("Exporting raw events", ["Load events", "Write files"])
         self.log("Exporting raw activity events ...")
         threading.Thread(target=self._raw_worker,
                          args=(data_dir, self.chk_parquet.isChecked(), self.chk_csv.isChecked()),
@@ -407,7 +414,9 @@ class PowerBIView(QWidget):
         t0 = time.time()
         try:
             import raw_export
+            self.shell.run_step(0)
             raw_export.export(data_dir, want_parquet=want_parquet, want_csv=want_csv)
+            self.shell.run_finish()
             self.log(f"Raw export written under {(data_dir / 'raw')}")
             fmts = ", ".join(f for f, on in (("Parquet", want_parquet), ("CSV", want_csv)) if on)
             self._record(data_dir / "raw", "raw_export", "Raw event export",
@@ -430,7 +439,8 @@ class PowerBIView(QWidget):
         self.btn_analytics.setEnabled(False)
         for c in (self.cmb_ws, self.cmb_report, self.cmb_window):
             c.setEnabled(False)
-        self.shell.busy_begin("Building usage analytics")
+        self.shell.busy_begin("Building usage analytics",
+                              ["Load events", "Aggregate", "Write tables"])
         self.log("Building Power BI usage analytics ...")
         threading.Thread(target=self._analytics_worker, args=(data_dir,), daemon=True).start()
 
@@ -438,12 +448,15 @@ class PowerBIView(QWidget):
         t0 = time.time()
         try:
             import analytics
+            self.shell.run_step(0)
             frames = analytics.compute(data_dir)          # one load, shared with the CSVs
+            self.shell.run_step(2, f"{len(frames['report_usage_daily']):,} rows")
 
             out_dir = data_dir / "analytics"
             out_dir.mkdir(parents=True, exist_ok=True)
             for name in ("report_usage_daily", "user_report_usage", "user_daily_usage"):
                 frames[name].to_csv(out_dir / f"{name}.csv", index=False, encoding="utf-8-sig")
+            self.shell.run_finish()
             self.log(f"Usage tables written under {out_dir}")
 
             # Records at (workspace, report, user, day) grain - everything the
@@ -485,7 +498,7 @@ class PowerBIView(QWidget):
             QMessageBox.warning(self, "Power BI settings", str(e))
             return
         self.btn_lineage.setEnabled(False)
-        self.shell.busy_begin("Scanning model lineage")
+        self.shell.busy_begin("Scanning model lineage", ["Scan the tenant", "Write report"])
         self.log("Scanning Power BI model lineage (tenant-wide) ...")
         threading.Thread(target=self._lineage_worker, args=(settings, data_dir), daemon=True).start()
 
@@ -498,6 +511,7 @@ class PowerBIView(QWidget):
 
             tokens = PowerBITokenProvider(settings)
             client = PowerBIAdminClient(tokens)
+            self.shell.run_step(0)
             results = scan_model_lineage(client, cancel_check=self.shell.cancel_requested,
                                          log=self.shell.sig_log.emit)
             if self.shell.cancel_requested():
@@ -506,9 +520,11 @@ class PowerBIView(QWidget):
             if not results:
                 self.log("No semantic models found.")
                 return
+            self.shell.run_step(1, f"{len(results)} tables")
             text = render_model_lineage_text(results)
             self.sig_lineage_done.emit(text)
             out_path = write_model_lineage_report(results, data_dir / "model_lineage", self.shell.sig_log.emit)
+            self.shell.run_finish()
             self.log(f"Model lineage report -> {Path(out_path).name}")
             datasets = {r.get("dataset_id") for r in results if r.get("dataset_id")}
             tables = sum(1 for r in results if r.get("status") != "dataset_has_no_tables")

@@ -25,7 +25,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QWidget, QFrame, QLabel, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QPushButton, QScrollArea, QStackedWidget,
+    QPushButton, QProgressBar, QScrollArea, QStackedWidget,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QSizePolicy,
 )
 
@@ -491,6 +491,140 @@ class Banner(QFrame):
         body.setWordWrap(True)
         body.setStyleSheet(f"background: transparent; color: {ink}; border: none;")
         lay.addWidget(body, 1)
+
+
+# ------------------------------------------------------------------- run card
+class RunCard(QFrame):
+    """What a long run looks like while it runs (REDESIGN_SPEC.md step 4).
+
+    Replaces the indeterminate bar and the wall of log text with: what is
+    running, how long it has been going, a determinate meter once a worker
+    reports counts, and the run's named steps with the result of each one as it
+    finishes. The log is still there, one click away in its drawer.
+
+    One card on the shell rather than one per task page, which is also what the
+    design's own note implies: you can leave the page, the job keeps running.
+    """
+
+    def __init__(self, on_cancel):
+        super().__init__()
+        self.setObjectName("card")
+        self._steps = []          # [(name, label)]
+        self._at = -1
+        self._results = {}        # index -> what that step found
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(8)
+
+        head = QHBoxLayout()
+        self.lbl_title = head_label("", 13)
+        head.addWidget(self.lbl_title)
+        head.addStretch(1)
+        self.lbl_clock = QLabel("")
+        self.lbl_clock.setObjectName("muted")
+        head.addWidget(self.lbl_clock)
+        self.btn_cancel = QPushButton("Cancel run")
+        self.btn_cancel.setObjectName("ghost")
+        self.btn_cancel.clicked.connect(on_cancel)
+        head.addWidget(self.btn_cancel)
+        lay.addLayout(head)
+
+        self.meter = QProgressBar()
+        self.meter.setTextVisible(True)
+        self.meter.setFixedHeight(16)
+        lay.addWidget(self.meter)
+
+        self.steps_box = QVBoxLayout()
+        self.steps_box.setSpacing(2)
+        lay.addLayout(self.steps_box)
+
+        self.lbl_detail = QLabel("")
+        self.lbl_detail.setObjectName("muted")
+        lay.addWidget(self.lbl_detail)
+        self.setVisible(False)
+
+    # ---- lifecycle ----
+    def begin(self, title, steps=()):
+        self._steps = list(steps)
+        self._at = -1
+        self._results = {}
+        self.lbl_title.setText(title)
+        self.lbl_detail.setText("")
+        self.btn_cancel.setText("Cancel run")
+        self.btn_cancel.setEnabled(True)
+        self.set_progress(None, None, "")
+        self._render_steps()
+        self.setVisible(True)
+
+    def end(self):
+        self.setVisible(False)
+
+    def set_title(self, title):
+        self.lbl_title.setText(title)
+
+    def set_clock(self, text):
+        self.lbl_clock.setText(text)
+
+    def cancelling(self):
+        self.btn_cancel.setText("Cancelling…")
+        self.btn_cancel.setEnabled(False)
+
+    # ---- progress ----
+    def set_progress(self, done, total, noun=""):
+        """A determinate meter once a worker knows its total; indeterminate
+        until then, because a fake percentage is worse than an honest spinner."""
+        if total:
+            self.meter.setRange(0, int(total))
+            self.meter.setValue(int(done or 0))
+            pct = int(round((done or 0) / total * 100))
+            self.meter.setFormat(f"{done or 0} of {total} {noun}".strip() + f"  ·  {pct}%")
+        else:
+            self.meter.setRange(0, 0)
+            self.meter.setFormat("")
+
+    def set_detail(self, text):
+        self.lbl_detail.setText(text)
+
+    def step(self, index, result=""):
+        """Mark step `index` as the one running; everything before it is done.
+        `result` is what the step that just finished found."""
+        if 0 <= self._at < len(self._steps) and result:
+            self._results[self._at] = result
+        self._at = index
+        self._render_steps()
+
+    def finish_step(self, result=""):
+        if 0 <= self._at < len(self._steps) and result:
+            self._results[self._at] = result
+        self._at = len(self._steps)
+        self._render_steps()
+
+    def _render_steps(self):
+        clear_layout(self.steps_box)
+        for i, name in enumerate(self._steps):
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            if i < self._at:
+                mark, colour, state = "\u2713", GOOD, self._results.get(i, "done")
+            elif i == self._at:
+                mark, colour, state = "\u2192", ACCENT, self._results.get(i, "running")
+            else:
+                mark, colour, state = "\u00b7", MUTED, "pending"
+            m = QLabel(mark)
+            m.setStyleSheet(f"color: {colour}; background: transparent;")
+            m.setFixedWidth(12)
+            row.addWidget(m)
+            n = QLabel(name)
+            n.setStyleSheet("background: transparent;" if i <= self._at
+                            else f"color: {MUTED}; background: transparent;")
+            row.addWidget(n)
+            row.addStretch(1)
+            r = QLabel(state)
+            r.setObjectName("muted")
+            row.addWidget(r)
+            holder = QWidget()
+            holder.setLayout(row)
+            self.steps_box.addWidget(holder)
 
 
 # ------------------------------------------------------------------- action bar
