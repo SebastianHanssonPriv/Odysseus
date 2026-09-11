@@ -95,6 +95,17 @@ shared library of the settled decisions above. The per-product `output_dir_qlik`
 and `output_dir_powerbi` settings are gone; `_load_settings` migrates from
 either one.
 
+Bufab's library is
+`.../sites/BU-NordicAnalyticsKeyUsers-Testchannel/Shared Documents/Global BI
+Internal/Other BI Solutions/BIGovLib`. `sharepoint.py` turns that URL into the
+local synced path: the OneDrive client records every synced library in
+`HKCU\Software\Microsoft\OneDrive\Accounts\*\Tenants\*` as local path ->
+server URL, and failing that the decoded folder chain is searched for under the
+user's profile. The local path differs on every machine, so it is never typed
+or shared. Saving a library also lays out the feature folders and writes a
+README.txt describing them, because the folder is something colleagues open in
+SharePoint.
+
 ## Report records
 
 `<workbook>.bbgs.json` sits beside each workbook:

@@ -17,6 +17,8 @@ import sys
 import json
 import threading
 
+import sharepoint
+
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QIcon, QPixmap, QFont
 from PySide6.QtWidgets import (
@@ -121,7 +123,23 @@ class SettingsDialog(QDialog):
         # --- one library folder for everything both products write ---
         lay.addWidget(self._sec("LIBRARY FOLDER"))
         og = QGridLayout()
-        og.addWidget(self._mut("Library folder"), 0, 0)
+        og.addWidget(self._mut("SharePoint URL"), 0, 0)
+        self.ed_library_url = QLineEdit(parent.library_url)
+        self.ed_library_url.setPlaceholderText(
+            "paste the library's address from the browser, then click Find")
+        tip(self.ed_library_url,
+            "Paste the SharePoint address of the library, exactly as it appears in the "
+            "browser, and click Find synced folder.\n\nStudio writes ordinary files, so it "
+            "needs the local folder the OneDrive client syncs that library to - not the "
+            "https:// address. That local path is different on every machine, which is why "
+            "this looks it up instead of asking you to type it.\n\nThe library has to be "
+            "synced first: open it in SharePoint and click Sync.")
+        og.addWidget(self.ed_library_url, 0, 1)
+        b_find = QPushButton("Find synced folder")
+        b_find.setObjectName("ghost")
+        b_find.clicked.connect(self._find_synced)
+        og.addWidget(b_find, 0, 2)
+        og.addWidget(self._mut("Library folder"), 1, 0)
         self.ed_library = QLineEdit(parent.output_dir)
         self.ed_library.setPlaceholderText(r"e.g. C:\Users\you\Bufab\BI Governance - Library")
         tip(self.ed_library, "Point this at a folder that OneDrive or the SharePoint client syncs "
@@ -129,11 +147,11 @@ class SettingsDialog(QDialog):
                              "every report, opens the workbooks in Excel or the browser, and needs "
                              "no copy of Studio.\n\nA plain local folder works too - it is then "
                              "just your own library.")
-        og.addWidget(self.ed_library, 0, 1)
+        og.addWidget(self.ed_library, 1, 1)
         browse = QPushButton("Browse...")
         browse.setObjectName("ghost")
         browse.clicked.connect(lambda: self._browse(self.ed_library))
-        og.addWidget(browse, 0, 2)
+        og.addWidget(browse, 1, 2)
         og.setColumnStretch(1, 1)
         lay.addLayout(og)
         note_out = self._mut("Everything both products write goes here, each feature in its own "
@@ -179,6 +197,32 @@ class SettingsDialog(QDialog):
         self.ed_p_kv.setEnabled(vault_mode)
         self.ed_p_kvsecret.setEnabled(vault_mode)
 
+    def _find_synced(self):
+        """Turn the pasted SharePoint URL into the local synced folder."""
+        url = self.ed_library_url.text().strip()
+        info = sharepoint.parse_library_url(url)
+        if not info:
+            QMessageBox.warning(self, "SharePoint URL",
+                                "That does not look like a SharePoint library address.\n\n"
+                                "Open the library in the browser and copy the address bar, or "
+                                "use Copy link on the folder.")
+            return
+        found = sharepoint.resolve(url)
+        if found:
+            self.ed_library.setText(found)
+            QMessageBox.information(self, "Found it",
+                                    f"{sharepoint.describe(url)}\n\nis synced to:\n{found}")
+            return
+        chain = "\\".join(info["folders"])
+        QMessageBox.warning(
+            self, "Not synced on this PC",
+            f"The library was recognised:\n  {sharepoint.describe(url)}\n\n"
+            "but no synced copy of it was found on this PC.\n\n"
+            "Open the library in SharePoint and click Sync, wait for it to finish, then "
+            "click Find synced folder again.\n\nOnce synced it appears under your user "
+            f"folder, ending in:\n  ...\\{chain}\n\nYou can also point Browse at it "
+            "directly.")
+
     def _browse(self, lineedit):
         d = QFileDialog.getExistingDirectory(self, "Choose the library folder",
                                              lineedit.text() or os.path.expanduser("~"))
@@ -195,7 +239,8 @@ class SettingsDialog(QDialog):
         }
         self._main.apply_settings(
             self.ed_q_tenant.text().strip(), self.ed_q_key.text(),
-            self.ed_library.text().strip(), pbi, self.ed_p_secret.text())
+            self.ed_library.text().strip(), self.ed_library_url.text().strip(),
+            pbi, self.ed_p_secret.text())
         self.accept()
 
 
@@ -218,6 +263,7 @@ class MainWindow(QMainWindow):
         self.tenant = ""
         self.api_key = ""            # in memory only
         self.output_dir = ""         # the library: one root for everything written
+        self.library_url = ""        # the SharePoint address that folder syncs
         self.pbi = {"tenant_id": "", "client_id": "", "auth_mode": PBI_AUTH_MODES[0],
                     "key_vault_url": "", "key_vault_secret_name": ""}
         self.pbi_secret = ""         # in memory only
@@ -527,15 +573,25 @@ class MainWindow(QMainWindow):
     def _open_settings(self):
         SettingsDialog(self).exec()
 
-    def apply_settings(self, qlik_tenant, qlik_key, output_dir, pbi, pbi_secret):
+    def apply_settings(self, qlik_tenant, qlik_key, output_dir, library_url, pbi, pbi_secret):
         self.tenant = qlik_tenant
         self.api_key = qlik_key
         self.output_dir = output_dir
+        self.library_url = library_url
         self.pbi = pbi
         self.pbi_secret = pbi_secret
         self._save_settings()
         self.refresh_status()
         self.log("Settings saved.")
+        if output_dir and os.path.isdir(output_dir):
+            # Lay the folders out now, so the library reads as an organised
+            # place in SharePoint from the start instead of filling in feature
+            # by feature as people happen to run things.
+            made = sharepoint.prepare_library(output_dir, log=self.log)
+            if made:
+                self.log(f"Prepared the library layout ({made} folder(s) created) "
+                         "and wrote README.txt.")
+            self.reports_changed()
         # auto-reload Qlik apps if its creds are set/changed
         if self.tenant and self.api_key.strip():
             self.qlik_view.refresh_after_settings()
@@ -550,6 +606,7 @@ class MainWindow(QMainWindow):
             # always the same folder) so nobody has to re-pick it.
             self.output_dir = (s.get("output_dir") or s.get("output_dir_qlik")
                                or s.get("output_dir_powerbi") or "")
+            self.library_url = s.get("library_url", "")
             saved_pbi = s.get("pbi", {}) or {}
             for k in self.pbi:
                 if k in saved_pbi:
@@ -559,7 +616,8 @@ class MainWindow(QMainWindow):
 
     def _save_settings(self):
         try:
-            data = {"tenant": self.tenant, "output_dir": self.output_dir, "pbi": self.pbi}
+            data = {"tenant": self.tenant, "output_dir": self.output_dir,
+                    "library_url": self.library_url, "pbi": self.pbi}
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
         except Exception:

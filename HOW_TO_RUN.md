@@ -52,12 +52,37 @@ Open **Settings** (bottom of the nav rail) and fill in what you need:
     original name on purpose: `collect_daily.bat` and `.env` point `OUTPUT_DIR`
     at it, so renaming it would break the scheduled daily collection.
 
-  **Sharing it between users.** Point the library at a folder that OneDrive or
-  the SharePoint client syncs, and it becomes the shared library: everyone with
-  access to that SharePoint library sees every report, opens the workbooks in
-  Excel or the browser, and needs no copy of Studio. A plain local folder works
-  too — it is then just your own library. Give everyone who runs Studio the
-  same synced path and their runs land in the same library.
+  **Pointing it at SharePoint.** Studio writes ordinary files, so the setting
+  has to be a path on disk — an `https://` address is not something it can write
+  to. What makes the library shared is that the path sits inside a folder the
+  OneDrive client syncs.
+
+  Bufab's library is here:
+
+  ```
+  https://bufabcom.sharepoint.com/sites/BU-NordicAnalyticsKeyUsers-Testchannel/
+    Shared Documents/Global BI Internal/Other BI Solutions/BIGovLib
+  ```
+
+  To use it:
+  1. Open that library in the browser and click **Sync**. Wait for OneDrive to
+     finish.
+  2. In Studio: **Settings → Library folder → SharePoint URL**, paste the
+     address, click **Find synced folder**.
+
+  Studio reads the OneDrive client's own registry of synced libraries, and
+  falls back to searching your user folder for the matching folder chain, so
+  you never type the local path. It differs on every machine — something like
+  `C:\Users\you\Bufab\BU-Nordic Analytics Key Users - Testchannel\Global BI
+  Internal\Other BI Solutions\BIGovLib` — which is exactly why it is looked up
+  rather than shared around. If it cannot be found, the library is not synced
+  on that PC yet; **Browse...** always works as the manual route.
+
+  Saving a library folder creates the feature subfolders and drops a
+  `README.txt` in it explaining the layout, so the SharePoint folder reads as
+  an organised place from the start. Everyone who runs Studio against the same
+  synced library lands their runs in it, and colleagues without Studio just
+  open the workbooks from SharePoint.
 
   Upgrading from a version with separate **Qlik** and **Power BI** output
   folders? The library is pre-filled from whichever of those was set, so there
