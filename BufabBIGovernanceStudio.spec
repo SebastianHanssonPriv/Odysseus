@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('app_icon.ico', '.'), ('bufab_header.png', '.')]
+datas = [('app_icon.ico', '.'), ('bufab_header.png', '.'), ('fonts', 'fonts')]
 binaries = []
 hiddenimports = ['auth', 'config', 'powerbi_client', 'activity_events', 'raw_export', 'analytics', 'qlik_core', 'qlik_capacity', 'scanner', 'dataflow_admin', 'mashup_parser', 'model_lineage']
 tmp_ret = collect_all('azure.identity')

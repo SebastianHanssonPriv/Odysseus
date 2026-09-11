@@ -229,7 +229,11 @@ build.bat
 ```
 → `dist\BufabBIGovernanceStudio.exe` — a single file that runs without Python.
 (A fresh unsigned `.exe` may trip Windows SmartScreen → *More info → Run anyway*,
-or code-sign it.) The build bundles QtCharts and the Azure Key Vault auth path.
+or code-sign it.) The build bundles QtCharts, the Azure Key Vault auth path, and
+the `fonts\` folder. The UI uses **Barlow** / **Barlow Condensed**; those `.ttf`
+files are not committed — see `fonts\README.md` for the three files to drop in.
+Without them the app still runs and just falls back to Segoe UI, logging one line
+at startup.
 
 ---
 

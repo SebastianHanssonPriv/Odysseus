@@ -25,7 +25,10 @@ from PySide6.QtWidgets import (
     QFrame, QButtonGroup, QStackedWidget, QPlainTextEdit, QProgressBar,
 )
 
-from widgets import STYLE, TEAL, TEAL_DARK, make_card, label
+from widgets import (
+    STYLE, TEAL, TEAL_DARK, RAIL, RAIL_FG, FONT_HEAD,
+    make_card, label, load_fonts, app_font,
+)
 from qlik_view import QlikView
 from powerbi_view import PowerBIView
 from home_view import HomeView
@@ -293,7 +296,7 @@ class MainWindow(QMainWindow):
 
     def _build_header(self):
         head = QFrame()
-        head.setStyleSheet(f"background: {TEAL};")
+        head.setStyleSheet(f"background: {RAIL};")
         head.setFixedHeight(76)
         lay = QHBoxLayout(head)
         lay.setContentsMargins(22, 0, 22, 0)
@@ -306,15 +309,16 @@ class MainWindow(QMainWindow):
             lay.addWidget(logo)
         else:
             wm = QLabel("BUFAB")
-            wm.setStyleSheet("background: transparent; color: white; font-size: 21pt; "
-                             "font-weight: 800; letter-spacing: 1px;")
+            wm.setStyleSheet(f"background: transparent; color: white; font-family: {FONT_HEAD}; "
+                             "font-size: 21pt; font-weight: 600;")
             lay.addWidget(wm)
         box = QVBoxLayout()
         box.setSpacing(0)
         t = QLabel("BI Governance Studio")
-        t.setStyleSheet("background: transparent; color: white; font-size: 16pt; font-weight: 700;")
+        t.setStyleSheet(f"background: transparent; color: white; font-family: {FONT_HEAD}; "
+                        "font-size: 16pt; font-weight: 600;")
         s = QLabel("Govern, document and right-size your Qlik Cloud and Power BI estates")
-        s.setStyleSheet("background: transparent; color: #CFE0E6; font-size: 9pt;")
+        s.setStyleSheet(f"background: transparent; color: {RAIL_FG}; font-size: 9pt;")
         box.addWidget(t)
         box.addWidget(s)
         lay.addLayout(box)
@@ -532,11 +536,16 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    missing_fonts = load_fonts(BASE_DIR)
     app.setStyleSheet(STYLE)
-    app.setFont(QFont("Segoe UI", 10))
+    app.setFont(QFont("Segoe UI", 10) if missing_fonts else app_font())
     if os.path.exists(ICON_PATH):
         app.setWindowIcon(QIcon(ICON_PATH))
     win = MainWindow()
+    if missing_fonts:
+        win.log("Barlow fonts not found (" + ", ".join(missing_fonts) +
+                ") - falling back to Segoe UI. Drop the .ttf files in fonts\\ to "
+                "get the intended type.")
     win.show()
     sys.exit(app.exec())
 

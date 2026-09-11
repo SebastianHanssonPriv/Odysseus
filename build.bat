@@ -39,6 +39,7 @@ if exist "app_icon.ico" (
     echo No app_icon.ico found - building with the default icon.
 )
 if exist "bufab_header.png" set DATA_OPT=%DATA_OPT% --add-data "bufab_header.png;."
+if exist "fonts" set DATA_OPT=%DATA_OPT% --add-data "fonts;fonts"
 set VER_OPT=
 if exist "version_info.txt" (
     echo Using version info: version_info.txt
