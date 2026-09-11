@@ -27,7 +27,7 @@ import qlik_core as core
 import qlik_capacity as qcap
 from widgets import (
     TEAL, BAD, WARN, GOOD, MUTED, ROW_HOVER, FONT_HEAD, BAR, LINE, Tag,
-    make_card, label, ElidedLabel,
+    make_card, label, tip, ElidedLabel,
     key_format_ok, scrub, friendly_load_error, human_bytes,
     KpiCard, MeterBar, kpi_row, ranked_bars, colored_table, clear_layout,
 )
@@ -251,6 +251,9 @@ class QlikView(QWidget):
         brow = QHBoxLayout()
         self.btn_run = QPushButton("Run export")
         self.btn_run.setObjectName("accent")
+        tip(self.btn_run, "Writes one Excel workbook per selected app, containing the item "
+                                "types ticked above, into the Qlik output folder's metadata "
+                                "subfolder.")
         self.btn_run.clicked.connect(self._on_run)
         brow.addWidget(self.btn_run)
         brow.addStretch(1)
@@ -295,14 +298,18 @@ class QlikView(QWidget):
         ucl.addWidget(label("USAGE & LEANNESS  (what is NOT used)", "section"))
         ucl.addWidget(label("For each selected app: flags unused master items, model fields, tables "
                             "and variables.", "muted"))
-        warn = label("Results are CANDIDATES - verify before deleting. Dynamic $(=...) expressions can "
-                     "hide usage; the report lists them to review manually.", "muted", wrap=True)
+        warn = label("Results are CANDIDATES - verify before deleting.", "muted")
         warn.setStyleSheet(f"color: {BAD};")
+        tip(warn, "Dynamic $(=...) expressions can hide real usage. The report lists those "
+                        "separately so you can review them by hand instead of trusting the flag.")
         ucl.addWidget(warn)
         ul.addWidget(uc)
         urow = QHBoxLayout()
         self.btn_usage = QPushButton("Analyze usage")
         self.btn_usage.setObjectName("accent")
+        tip(self.btn_usage, "Read-only. For each selected app, flags master items, model "
+                                  "fields, tables and variables that nothing references, and shows "
+                                  "them per app below.")
         self.btn_usage.clicked.connect(self._on_usage)
         urow.addWidget(self.btn_usage)
         urow.addStretch(1)
@@ -335,9 +342,10 @@ class QlikView(QWidget):
         ac = make_card()
         acl = QVBoxLayout(ac)
         acl.addWidget(label("APPLY MASTER ITEMS  (create / update / delete - measures & dimensions)", "section"))
-        awarn = label("This WRITES to and SAVES the selected app(s). A backup of the current master "
-                      "items is exported first. Use Dry run to preview with no changes.", "muted", wrap=True)
+        awarn = label("This WRITES to and SAVES the selected app(s).", "muted")
         awarn.setStyleSheet(f"color: {BAD};")
+        tip(awarn, "A backup of the current master items is exported first. Use Dry run to "
+                         "preview every change with nothing written.")
         acl.addWidget(awarn)
         agrid = QGridLayout()
         agrid.setHorizontalSpacing(10)
@@ -387,31 +395,33 @@ class QlikView(QWidget):
         lc = make_card()
         lcl = QVBoxLayout(lc)
         lcl.addWidget(label("QVD FIELD USAGE REPORT", "section"))
-        lcl.addWidget(label("For each selected app: which QVDs it reads, and which fields in them are "
-                            "confirmed present in the final data model. Writes one combined Excel "
-                            "workbook (qvd_field_usage_*.xlsx) and shows a summary below - treat "
-                            "'not found' fields as a prioritized worklist, not a verdict.",
-                            "muted", wrap=True))
+        lcl.addWidget(label("Which QVDs each selected app reads, and which of their fields reach "
+                            "the final data model.", "muted"))
         self.chk_qvd_upstream = QCheckBox("Also trace upstream to the true source")
+        tip(self.chk_qvd_upstream, "Resolves each confirmed field back to the database table "
+                                         "or file it originally came from. Slower: it opens every "
+                                         "QVD's producing app via Qlik's own lineage graph.")
         lcl.addWidget(self.chk_qvd_upstream)
-        lcl.addWidget(label("Resolves confirmed fields back to a database table or file. Slower: it "
-                            "opens each QVD's producing app via Qlik's own lineage graph.",
-                            "muted", wrap=True))
         qrow = QHBoxLayout()
         self.btn_qvd_usage = QPushButton("Scan QVD field usage")
         self.btn_qvd_usage.setObjectName("accent")
+        tip(self.btn_qvd_usage, "Writes one combined workbook (qvd_field_usage_*.xlsx) and "
+                                      "shows a summary below. Treat 'not found' fields as a "
+                                      "prioritized worklist, not a verdict.")
         self.btn_qvd_usage.clicked.connect(self._on_qvd_usage)
         qrow.addWidget(self.btn_qvd_usage)
         qrow.addStretch(1)
         lcl.addLayout(qrow)
 
+        lcl.addSpacing(10)
         lcl.addWidget(label("FIELD LINEAGE", "section"))
-        lcl.addWidget(label("The pipeline a field took INTO this app.", "muted", wrap=True))
-        lcl.addWidget(label("Select exactly ONE app above, click 'Load fields', pick a field, then 'Trace'.",
-                            "muted", wrap=True))
+        lcl.addWidget(label("The pipeline one field took INTO one app.", "muted"))
         irow = QHBoxLayout()
         self.btn_index = QPushButton("Build cross-app index")
         self.btn_index.setObjectName("ghost")
+        tip(self.btn_index, "Optional. Indexes every app's load script so the fallback trace "
+                                  "can find a producing app when the native lineage graph has no "
+                                  "answer.")
         self.btn_index.clicked.connect(self._on_build_index)
         irow.addWidget(self.btn_index)
         self.lbl_index = QLabel("Cross-app index: not built (only used by the fallback trace)")
@@ -420,9 +430,9 @@ class QlikView(QWidget):
         lcl.addLayout(irow)
         self.chk_native = QCheckBox("Add upstream apps from Qlik's own lineage")
         self.chk_native.setChecked(True)
+        tip(self.chk_native, "Extends the pipeline back into the apps that produce the "
+                                   "source, rather than stopping at the first QVD.")
         lcl.addWidget(self.chk_native)
-        lcl.addWidget(label("Extends the pipeline back into the apps that produce the source.",
-                            "muted", wrap=True))
         frow = QHBoxLayout()
         self.btn_load_fields = QPushButton("Load fields")
         self.btn_load_fields.setObjectName("ghost")
@@ -435,6 +445,8 @@ class QlikView(QWidget):
         frow.addWidget(self.cmb_field, 1)
         self.btn_trace = QPushButton("Trace lineage")
         self.btn_trace.setObjectName("accent")
+        tip(self.btn_trace, "Select exactly ONE app above, click 'Load fields', pick a field, "
+                                  "then trace it.")
         self.btn_trace.clicked.connect(self._on_trace)
         frow.addWidget(self.btn_trace)
         lcl.addLayout(frow)
@@ -452,15 +464,17 @@ class QlikView(QWidget):
         capc = make_card()
         capcl = QVBoxLayout(capc)
         capcl.addWidget(label("CAPACITY REPORT  (App reload + Import)", "section"))
-        capcl.addWidget(label("Scans every app's data-model size and every imported dataset / data file "
-                              "across the whole tenant, ranks the biggest savings, shows the result below "
-                              "and writes one Excel workbook. No app selection needed.", "muted", wrap=True))
-        self.chk_cap_orphans = QCheckBox("Include orphan scan (reads every app's load script to flag "
-                                         "imports no app uses - slower)")
+        capcl.addWidget(label("Every app's data-model size and every imported dataset, "
+                              "tenant-wide.", "muted"))
+        self.chk_cap_orphans = QCheckBox("Include orphan scan")
+        tip(self.chk_cap_orphans, "Reads every app's load script to flag imported datasets "
+                                        "and data files that no app uses. Slower.")
         capcl.addWidget(self.chk_cap_orphans)
         caprow = QHBoxLayout()
         self.btn_capacity = QPushButton("Scan & export capacity report")
         self.btn_capacity.setObjectName("accent")
+        tip(self.btn_capacity, "No app selection needed. Ranks the biggest savings, shows the "
+                                     "result below and writes one Excel workbook.")
         self.btn_capacity.clicked.connect(self._on_capacity)
         caprow.addWidget(self.btn_capacity)
         caprow.addStretch(1)
@@ -486,20 +500,21 @@ class QlikView(QWidget):
         tl.setContentsMargins(0, 10, 0, 0)
         tc = make_card()
         tcl = QVBoxLayout(tc)
-        tcl.addWidget(label("TENANT QVD & FIELD USAGE  (published apps only)", "section"))
-        tcl.addWidget(label("Scans every PUBLISHED app in the tenant, then walks backward via Qlik's "
-                            "own lineage graph through every upstream/staging app that feeds it, for "
-                            "the full source-to-model picture: which QVDs are read, which fields make "
-                            "it into the model, whether a published app's field is also actually used "
-                            "in a measure, dimension or visual - and for every field, its TRUE origin: "
-                            "traced as far back as the lineage allows, ideally to a database table and "
-                            "the connection/database it came from, or to a file, wherever the chain of "
-                            "producing apps ultimately stops. No app selection needed, but this opens "
-                            "every app in the lineage (root and upstream alike), so it can take a while.",
-                            "muted", wrap=True))
+        tcl.addWidget(label("TENANT QVD & FIELD USAGE", "section"))
+        tcl.addWidget(label("Published apps walked back through every upstream app that feeds "
+                            "them.", "muted"))
         trow = QHBoxLayout()
         self.btn_tenant_usage = QPushButton("Scan tenant QVD & field usage")
         self.btn_tenant_usage.setObjectName("accent")
+        tip(self.btn_tenant_usage, 
+            "Scans every PUBLISHED app in the tenant, then walks backward via Qlik's own lineage "
+            "graph through every upstream/staging app that feeds it, for the full source-to-model "
+            "picture: which QVDs are read, which fields make it into the model, whether a published "
+            "app's field is also actually used in a measure, dimension or visual, and for every "
+            "field its TRUE origin - traced as far back as the lineage allows, ideally to a "
+            "database table and the connection it came from, or to a file, wherever the chain of "
+            "producing apps stops.\n\nNo app selection needed, but it opens every app in the "
+            "lineage, root and upstream alike, so it can take a while.")
         self.btn_tenant_usage.clicked.connect(self._on_tenant_usage)
         trow.addWidget(self.btn_tenant_usage)
         trow.addStretch(1)
@@ -520,13 +535,8 @@ class QlikView(QWidget):
         dc = make_card()
         dcl = QVBoxLayout(dc)
         dcl.addWidget(label("DIAGNOSE APP VISIBILITY", "section"))
-        dcl.addWidget(label("A suspected app - e.g. one you've confirmed sits in someone's Personal "
-                            "space - can be invisible to this tool's normal app list without ever "
-                            "showing up as an error: this checks, one layer at a time, whether THIS "
-                            "API key can see it at all (Items API - what every app list in this tool "
-                            "is built from), reach it directly by GUID, open it via the Engine API, "
-                            "and whether it shows up in another app's native lineage graph as a "
-                            "producer.", "muted", wrap=True))
+        dcl.addWidget(label("Test whether one app GUID is reachable with the current API key.",
+                            "muted"))
         dg = QGridLayout()
         dg.addWidget(label("App GUID to test", "muted"), 0, 0)
         self.ed_diag_guid = QLineEdit()
@@ -542,6 +552,13 @@ class QlikView(QWidget):
         drow = QHBoxLayout()
         self.btn_diag_visibility = QPushButton("Run diagnostic")
         self.btn_diag_visibility.setObjectName("accent")
+        tip(self.btn_diag_visibility, 
+            "A suspected app - one you've confirmed sits in someone's Personal space, say - can be "
+            "invisible to this tool's normal app list without ever showing up as an error.\n\n"
+            "This checks, one layer at a time, whether THIS API key can see it in the Items API "
+            "(what every app list in this tool is built from), reach it directly by GUID, open it "
+            "via the Engine API, and whether it appears in another app's native lineage graph as a "
+            "producer.")
         self.btn_diag_visibility.clicked.connect(self._on_diag_visibility)
         drow.addWidget(self.btn_diag_visibility)
         drow.addStretch(1)
@@ -568,9 +585,18 @@ class QlikView(QWidget):
     def _add_task(self, page, title, desc, badge=""):
         """Register a built page as a task: a card on the hub, a page in the
         stack. Stack index is the task index + 1, because the hub is inserted
-        at 0 once every task is known."""
+        at 0 once every task is known.
+
+        The page goes in behind a scroll area. Without one, a page taller than
+        the splitter's bottom pane gets squeezed below its minimum and Qt
+        draws its widgets on top of each other."""
         self._tasks.append((title, desc, badge))
-        self.task_stack.addWidget(page)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(page)
+        self.task_stack.addWidget(scroll)
 
     def _build_hub(self):
         """The landing page of the Qlik workspace: one card per task, three

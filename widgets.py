@@ -14,6 +14,8 @@ the structural parts of the redesign land separately.
 """
 from __future__ import annotations
 
+import html
+
 import os
 import urllib.error
 
@@ -113,6 +115,12 @@ QCheckBox {{ background: transparent; spacing: 6px; }}
 QFrame#card {{ background: transparent; border: 1px solid {LINE}; border-radius: 0px; }}
 QFrame#kpi {{ background: transparent; border: 1px solid {LINE}; border-radius: 0px; }}
 QFrame#bar {{ background: {BAR}; border: none; border-top: 1px solid {LINE}; }}
+
+/* Tooltips carry the long explanations that used to sit on the page, so they
+   are styled like the rail rather than left as an OS-yellow box. */
+QToolTip {{ background: {RAIL}; color: #FFFFFF; border: 1px solid {ACCENT_DEEP};
+            border-radius: 0px; padding: 7px 9px; font-family: {FONT_BODY};
+            font-size: 9pt; }}
 
 QLabel#muted {{ color: {MUTED}; }}
 QLabel#section {{ color: {MUTED}; font-family: {FONT_HEAD}; font-weight: 600; font-size: 8pt; }}
@@ -258,6 +266,18 @@ def label(text, obj=None, wrap=False):
         f.setLetterSpacing(_ABS_SPACING, 1.4)
         lbl.setFont(f)
     return lbl
+
+
+def tip(widget, text):
+    """Attach a long explanation to a control as a hover tooltip.
+
+    Qt only word-wraps a tooltip when its text is rich text - a long plain
+    string is drawn as one line running off the screen - so the text is
+    escaped and wrapped in HTML here. Blank lines become paragraph breaks.
+    Returns the widget, so it can be used inline."""
+    paras = [html.escape(" ".join(p.split())) for p in text.split("\n\n")]
+    widget.setToolTip("<html>" + "<br><br>".join(paras) + "</html>")
+    return widget
 
 
 class ElidedLabel(QLabel):

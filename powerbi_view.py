@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 
 from config import Settings
 from widgets import (
-    TEAL, WARN, GOOD, BAD, make_card, label, kpi_row, line_chart, ranked_bars,
+    TEAL, WARN, GOOD, BAD, make_card, label, tip, kpi_row, line_chart, ranked_bars,
     colored_table, clear_layout,
 )
 
@@ -108,12 +108,8 @@ class PowerBIView(QWidget):
         cc = make_card()
         ccl = QVBoxLayout(cc)
         ccl.addWidget(label("COLLECT  (activity events by UTC day)", "section"))
-        ccl.addWidget(label("Activity events retain only ~28 days, so collect regularly and let them "
-                            "accumulate into the dataset. Pull a single day or a whole range — "
-                            "already-collected days are skipped. Needs a service principal in the "
-                            "Power BI admin group. To run this unattended every day, see 'Run it daily' "
-                            "in HOW_TO_RUN.md (collect_daily.bat + Windows Task Scheduler).",
-                            "muted", wrap=True))
+        ccl.addWidget(label("Microsoft keeps activity events for about 28 days. Collect regularly "
+                            "and they accumulate.", "muted"))
         drow = QHBoxLayout()
         drow.addWidget(label("From (UTC)", "muted"))
         self.date_from = QDateEdit()
@@ -132,17 +128,25 @@ class PowerBIView(QWidget):
         drow.addWidget(self.date_to)
         drow.addStretch(1)
         ccl.addLayout(drow)
-        self.chk_skip_existing = QCheckBox("Skip days already collected (only pull missing days)")
+        self.chk_skip_existing = QCheckBox("Skip days already collected")
         self.chk_skip_existing.setChecked(True)
+        tip(self.chk_skip_existing, "Pulls only the days missing from the dataset, so re-running "
+                                    "over the same range costs nothing.")
         ccl.addWidget(self.chk_skip_existing)
         cl.addWidget(cc)
         crow = QHBoxLayout()
         self.btn_collect = QPushButton("Collect range")
         self.btn_collect.setObjectName("accent")
+        tip(self.btn_collect, "Collects the activity events for the UTC days above and appends them "
+                              "to the dataset.\n\nNeeds a service principal in the Power BI admin "
+                              "group.\n\nTo run this unattended every day, see 'Run it daily' in "
+                              "HOW_TO_RUN.md: collect_daily.bat plus Windows Task Scheduler.")
         self.btn_collect.clicked.connect(self._on_collect)
         crow.addWidget(self.btn_collect)
         self.btn_catchup = QPushButton("Catch up (last 28 days)")
         self.btn_catchup.setObjectName("ghost")
+        tip(self.btn_catchup, "Pulls everything Microsoft still has - the full retention window - "
+                              "ignoring the dates above.")
         self.btn_catchup.clicked.connect(self._on_catchup)
         crow.addWidget(self.btn_catchup)
         crow.addStretch(1)
@@ -157,8 +161,7 @@ class PowerBIView(QWidget):
         rc = make_card()
         rcl = QVBoxLayout(rc)
         rcl.addWidget(label("RAW EXPORT  (full event log, no aggregation)", "section"))
-        rcl.addWidget(label("Flattens every collected event into a lossless table plus a key map "
-                            "(which columns join to which dimension).", "muted", wrap=True))
+        rcl.addWidget(label("Every collected event, flattened, with no aggregation.", "muted"))
         orow = QHBoxLayout()
         self.chk_parquet = QCheckBox("Parquet (typed, lossless)")
         self.chk_parquet.setChecked(True)
@@ -172,6 +175,8 @@ class PowerBIView(QWidget):
         rrow = QHBoxLayout()
         self.btn_raw = QPushButton("Export raw events")
         self.btn_raw.setObjectName("accent")
+        tip(self.btn_raw, "Flattens every collected event into a lossless table plus a key "
+                                "map: which columns join to which dimension.")
         self.btn_raw.clicked.connect(self._on_raw)
         rrow.addWidget(self.btn_raw)
         rrow.addStretch(1)
@@ -186,12 +191,13 @@ class PowerBIView(QWidget):
         ac = make_card()
         acl = QVBoxLayout(ac)
         acl.addWidget(label("USAGE ANALYTICS", "section"))
-        acl.addWidget(label("Exact recorded views from the collected activity events. Build once, then "
-                            "slice by workspace, report and time window. (Time-per-visit and per-page "
-                            "usage are not available from the Admin APIs.)", "muted", wrap=True))
+        acl.addWidget(label("Exact recorded views from the collected activity events.", "muted"))
         brow = QHBoxLayout()
         self.btn_analytics = QPushButton("Build usage analytics")
         self.btn_analytics.setObjectName("accent")
+        tip(self.btn_analytics, "Build once, then slice by workspace, report and time window.\n\n"
+                                      "Time-per-visit and per-page usage are not exposed by the "
+                                      "Admin APIs, so they cannot be reported.")
         self.btn_analytics.clicked.connect(self._on_analytics)
         brow.addWidget(self.btn_analytics)
         brow.addStretch(1)
@@ -242,26 +248,26 @@ class PowerBIView(QWidget):
         mcl = QVBoxLayout(mc)
         mcl.addWidget(label("MODEL LINEAGE", "section"))
         mcl.addWidget(label("Semantic model table to warehouse source, direct or through a Gen1 "
-                            "dataflow. Tenant-wide scan via the Admin Scanner API - no workspace selection "
-                            "needed. Needs the tenant setting 'Enhance admin APIs responses with DAX "
-                            "and mashup expressions' enabled, or every table comes back as "
-                            "no_expression_available (see the Excel report's warning sheet). Writes "
-                            "one combined workbook (model_lineage_*.xlsx) listing, for each table, "
-                            "every source table/view it reads from - not just its primary one: a "
-                            "second table combined in to enrich/fix data (whether the same connector "
-                            "used twice, or a merge/join onto another query in the same dataset or "
-                            "dataflow) is also resolved and tagged with which query brought it in - "
-                            "which fields where the M code makes it explicit, and - for every model "
-                            "column - whether it's referenced by a measure or calculated column's DAX "
-                            "expression anywhere in the dataset (the closest proxy to 'used in a "
-                            "report' available without Power BI exposing visual/page content via API "
-                            "- a raw column placed directly on a visual with no calculation involved "
-                            "can't be detected this way). Also writes a Sources sheet: the reverse "
-                            "view, for each resolved source, how many tables across the tenant "
-                            "actually pull from it.", "muted", wrap=True))
+                            "dataflow.", "muted"))
         mrow = QHBoxLayout()
         self.btn_lineage = QPushButton("Scan model lineage")
         self.btn_lineage.setObjectName("accent")
+        tip(self.btn_lineage, 
+            "Tenant-wide scan via the Admin Scanner API, no workspace selection needed. Needs the "
+            "tenant setting 'Enhance admin APIs responses with DAX and mashup expressions' enabled, "
+            "or every table comes back as no_expression_available (see the workbook's warning "
+            "sheet).\n\n"
+            "Writes one combined workbook listing, for each table, EVERY source table or view it "
+            "reads from, not just its primary one: a second table combined in to enrich or fix "
+            "data - the same connector used twice, or a merge/join onto another query in the same "
+            "dataset or dataflow - is also resolved and tagged with the query that brought it "
+            "in.\n\n"
+            "For every model column it also reports whether a measure or calculated column's DAX "
+            "references it. That is the closest proxy to 'used in a report' available: Power BI "
+            "does not expose visual or page content via API, so a raw column placed straight onto "
+            "a visual cannot be detected.\n\n"
+            "A Sources sheet gives the reverse view: for each resolved source, how many tables "
+            "across the tenant pull from it.")
         self.btn_lineage.clicked.connect(self._on_lineage)
         mrow.addWidget(self.btn_lineage)
         mrow.addStretch(1)
