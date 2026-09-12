@@ -161,15 +161,26 @@ def score_app(app):
     app needs: published (bool|None), downstream_apps (int), objects (int),
     reload (ISO str), landed_fields_used (int).
     """
-    published = bool(app.get("published"))
+    # published and reloaded are best-effort from the Items API: None and ""
+    # mean "the tenant did not report it", never "no" and never "never". They
+    # used to be scored as though they meant no, which let missing telemetry
+    # push a live app down a tier. This module already refuses to do that for
+    # field states (STATE_UNKNOWN is "a gap in the scan, not a finding") and
+    # scope_sheet hides a filter it has no data for; the score now follows the
+    # same rule, and says which inputs were missing instead of guessing them.
+    published = app.get("published")
     downstream = int(app.get("downstream_apps") or 0)
     objects = int(app.get("objects") or 0)
     fields_used = int(app.get("landed_fields_used") or 0)
     age = _days_since(app.get("reload"))
 
     parts = []
+    missing = []
     score = 0
-    if published:
+    if published is None:
+        parts.append("publish state not reported by the tenant (0)")
+        missing.append("publish state")
+    elif published:
         score += 2
         parts.append("published (+2)")
     else:
@@ -196,8 +207,8 @@ def score_app(app):
     else:
         parts.append(f"references {fields_used} landed fields (0)")
     if age is None:
-        parts.append("no reload recorded (-1)")
-        score -= 1
+        parts.append("no reload time reported by the tenant (0)")
+        missing.append("last reload")
     elif age <= 7:
         score += 1
         parts.append(f"reloaded {age} d ago (+1)")
@@ -208,7 +219,12 @@ def score_app(app):
         parts.append(f"reloaded {age} d ago (0)")
 
     tier = "High" if score >= 5 else ("Medium" if score >= 3 else "Low")
-    return {"score": score, "tier": tier, "why": "; ".join(parts), "reload_age_days": age}
+    # A tier built on incomplete inputs can only move one way - up, once the
+    # missing input arrives - so it is labelled rather than quietly ranked
+    # alongside a fully evidenced one.
+    basis = "complete" if not missing else "provisional, missing " + " and ".join(missing)
+    return {"score": score, "tier": tier, "why": "; ".join(parts),
+            "reload_age_days": age, "basis": basis}
 
 
 # --------------------------------------------------------------- the scan
@@ -453,6 +469,8 @@ def render_text(result):
     for c in result["consumers"]:
         tiers[c["tier"]] = tiers.get(c["tier"], 0) + 1
     unknown = sum(1 for r in f if r["best_state"] == STATE_UNKNOWN)
+    provisional = sum(1 for c in result["consumers"]
+                      if c.get("basis", "").startswith("provisional"))
     lines = [
         "LANDED QVD FIELD IMPACT",
         "",
@@ -469,6 +487,10 @@ def render_text(result):
         f"  {carried:6}  in a model, referenced by nothing (carried for nothing)",
         f"  {script_only:6}  read by a script but never reach any model",
     ]
+    if provisional:
+        lines.insert(5, f"  of those, {provisional} tier(s) are provisional - the tenant did "
+                        f"not report publish state or last reload, and a tier built on a "
+                        f"missing input can only rise once it arrives")
     if unknown:
         lines.append(f"  {unknown:6}  in a model, usage unknown (a scan gap, not a finding)")
     lines.append("")
@@ -510,11 +532,14 @@ _SHEETS = (
                      "Fields without impact", "Read by anything at all"],
      lambda r: [r["qvd"], r["producers"], r["read_by_apps"], r["fields_seen"],
                 r["fields_with_impact"], r["fields_no_impact"], r["read_by_anything"]], "qvds"),
-    ("Criticality", ["App", "Space", "Criticality", "Score", "Published", "Feeds N apps",
-                     "Visual objects", "Landed fields referenced",
+    ("Criticality", ["App", "Space", "Criticality", "Score", "Evidence", "Published",
+                     "Feeds N apps", "Visual objects", "Landed fields referenced",
                      "Landed fields reaching the model", "Landed QVDs read",
                      "Reload age (days)", "How the score was built"],
-     lambda r: [r["name"], r["space"], r["tier"], r["score"], bool(r.get("published")),
+     lambda r: [r["name"], r["space"], r["tier"], r["score"], r.get("basis", ""),
+                # not bool(): None is "the tenant did not say", which is not False
+                {True: "Yes", False: "No", None: "not reported"}.get(r.get("published"),
+                                                                    "not reported"),
                 r.get("downstream_apps", 0), r.get("objects", 0),
                 r.get("landed_fields_used", 0), r.get("landed_fields_reaching", 0),
                 r.get("landed_qvds", 0), r.get("reload_age_days"), r["why"]], "consumers"),

@@ -279,8 +279,24 @@ and a figure claiming to be one would be invented. The tier is built instead
 from how much the estate depends on the app: published (+2), feeds other apps
 with its own QVDs (+2, or +3 for three or more), 15+ visual objects (+1) or 40+
 (+2), references 50+ landed fields (+1), reloaded within 7 days (+1), no reload
-recorded or none in 90 days (-1). High from 5, Medium from 3. The Criticality
-sheet shows every component per app, so a tier can be argued with.
+in 90 days (-1). High from 5, Medium from 3. The Criticality sheet shows every
+component per app, so a tier can be argued with.
+
+**A missing input scores 0, not a penalty.** `published` and the last reload
+time come from the Items API and are best-effort: absent means the tenant did
+not report it, not "no" and not "never". Both used to be scored as negatives —
+an unreported publish state counted as unpublished, and an unreported reload
+cost a point — so absent telemetry could push a live app down a tier, and in
+testing it did exactly that in both directions (Low↔Medium and
+Medium↔High). Those rows now carry an **Evidence** column reading
+`provisional, missing last reload`, the Published column reads `not reported`
+rather than `No`, and the summary counts how many tiers rest on an incomplete
+input. A provisional tier can only rise once the missing input arrives.
+
+One structural bias to know: the +3 for feeding other apps can only be earned
+by an app that writes QVDs, so a pure reporting app is scored on a shorter
+scale than a transform app. That is inherent to measuring dependency rather
+than use, and it is why the components are all shown rather than just the tier.
 
 Two limits worth knowing before acting on it. A field marked without impact is
 **not** automatically safe to drop: check its state, and check the wildcard and
