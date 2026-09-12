@@ -43,6 +43,7 @@ COVERS = {
     "test_gzip": "gzip is requested and decompressed; collapse=false is the default",
     "test_429": "a 429 is retried, a 404 is not",
     "test_shell_cache": "the tenant inventory is fetched once per session",
+    "test_meter": "the billed meter is shown in the unit the tenant reported",
 }
 
 

@@ -810,6 +810,37 @@ def fetch_consumption(tenant, api_key, periods=("current", "previous"), log=prin
     return recs
 
 
+def meter_is_bytes(rec):
+    """Whether a consumption record's figures are in bytes.
+
+    Every record carries a `unit` field. It was captured and never read, while
+    the capacity dashboard ran localUsage and capacityLimit through a byte
+    formatter regardless. On this tenant the meter does come back in bytes, so
+    the display is right here - but on a tenant reporting anything else the
+    gauge would have shown a byte figure off by the whole conversion, on a
+    widget whose job is to say OVERAGE.
+
+    An absent unit is treated as bytes, because that is what this tenant
+    returns and it keeps the observed behaviour; anything else is taken at its
+    word rather than assumed away.
+    """
+    unit = ((rec or {}).get("unit") or "").strip().lower()
+    # An exact match, not a substring: "gigabytes" and "megabytes" both contain
+    # "byte" and are emphatically not bytes. The first cut of this used `in`
+    # and reported a 500 gigabyte meter as 500 B.
+    return unit in ("", "byte", "bytes", "b")
+
+
+def meter_amount(rec, value):
+    """One consumption figure as text, in whatever unit the tenant reported."""
+    if value is None:
+        return "?"
+    if meter_is_bytes(rec):
+        return format_bytes(value)
+    unit = (rec or {}).get("unit") or ""
+    return f"{value:,.0f} {unit}".strip()
+
+
 def summarize_consumption(records):
     """Flatten consumption records and surface the two capacities. Each record's
     `segments` (e.g. {'APP': n} for app reloads, {'QDI': n} for data-integration
@@ -1159,7 +1190,8 @@ def print_two_capacity_summary(result, top=10):
         over = (used - lim) if (isinstance(used, (int, float)) and isinstance(lim, (int, float))) else None
         flag = (f"  !! OVERAGE (over by {format_bytes(over)})" if dv.get("overage") and over and over > 0
                 else ("  ! close to limit" if dv.get("closeToOverage") else ""))
-        print(f"\n[BILLED Data for Analysis] {format_bytes(used)} / {format_bytes(lim)} ({pct}){flag}")
+        print(f"\n[BILLED Data for Analysis] {meter_amount(dv, used)} / "
+              f"{meter_amount(dv, lim)} ({pct}){flag}")
     else:
         print("\n[BILLED Data for Analysis] no dataVolume record found")
     if c.get("app_reload"):
@@ -1322,12 +1354,13 @@ def write_capacity_report(result, out_dir, log=print):
     if dv:
         used, lim = dv.get("localUsage"), dv.get("capacityLimit")
         over = (used - lim) if (isinstance(used, (int, float)) and isinstance(lim, (int, float))) else None
-        status = (f"OVERAGE - over by {format_bytes(over)}" if dv.get("overage") and over and over > 0
+        status = (f"OVERAGE - over by {meter_amount(dv, over)}"
+                  if dv.get("overage") and over and over > 0
                   else ("close to limit" if dv.get("closeToOverage") else "ok"))
         summary_rows += [
             ["Period", f"{str(dv.get('periodStart', ''))[:10]} .. {str(dv.get('periodEnd', ''))[:10]}"],
-            ["Usage", format_bytes(used)],
-            ["Capacity limit", format_bytes(lim)],
+            ["Usage", meter_amount(dv, used)],
+            ["Capacity limit", meter_amount(dv, lim)],
             ["Used %", (f"{used / lim * 100:.3f}%" if lim else "")],
             ["Status", status],
         ]
@@ -1586,7 +1619,8 @@ def scan_meters(tenant, api_key, log=print):
         flag = (f"  !! OVERAGE (over by {format_bytes(over)})"
                 if dv.get("overage") and over and over > 0
                 else ("  ! close to limit" if dv.get("closeToOverage") else ""))
-        log(f"Data for Analysis (billed): {format_bytes(used)} / {format_bytes(lim)} ({pct}){flag}")
+        log(f"Data for Analysis (billed): {meter_amount(dv, used)} / "
+            f"{meter_amount(dv, lim)} ({pct}){flag}")
     else:
         log("Data for Analysis: no dataVolume record found (see the Consumption (raw) sheet).")
     # APP / QDI segment meters, only if this tenant emits them

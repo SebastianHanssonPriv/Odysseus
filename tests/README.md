@@ -45,6 +45,7 @@ python tests\test_parser.py
 | `test_df_parallel` | That walk is now concurrent, and must stay deterministic - results merge in connection order, not completion order, so a duplicate basename resolves the same way on every run. |
 | `test_gzip` | No REST response was ever compressed, because urllib sends no `Accept-Encoding`; and `collapse=true` silently dropped QVD nodes from lineage graphs. |
 | `test_429` | The lineage call had no retry, and the tenant-usage scan calls it once per published app - so one 429 silently dropped lineage for every app after it. A 404 must *not* be retried: most apps have no lineage graph at all. |
+| `test_meter` | The billed-capacity gauge ran usage and limit through a byte formatter while the `unit` the tenant reported was captured and never read. Also pins that the check is an exact match, since "gigabytes" contains "byte". |
 | `test_shell_cache` | The tenant data-file inventory costs one call per space now, so it is fetched once per session and dropped when the tenant changes. |
 
 ## Optional dependencies

@@ -904,11 +904,11 @@ class QlikView(QWidget):
             if dv:
                 used, lim = dv.get("localUsage"), dv.get("capacityLimit")
                 over = (used - lim) if (isinstance(used, (int, float)) and isinstance(lim, (int, float))) else None
-                flag = (f" OVERAGE (over by {qcap.format_bytes(over)})"
+                flag = (f" OVERAGE (over by {qcap.meter_amount(dv, over)})"
                         if dv.get("overage") and over and over > 0
                         else (" (close to limit)" if dv.get("closeToOverage") else ""))
                 self.log(f"  Billed capacity (Data for Analysis): "
-                         f"{qcap.format_bytes(used)} / {qcap.format_bytes(lim)}{flag}")
+                         f"{qcap.meter_amount(dv, used)} / {qcap.meter_amount(dv, lim)}{flag}")
             dups = red.get("duplicate_app_clusters", [])
             if dups:
                 t = dups[0]
@@ -960,13 +960,18 @@ class QlikView(QWidget):
         # billed meter gauge
         if dv and isinstance(dv.get("capacityLimit"), (int, float)) and dv.get("capacityLimit"):
             used, lim = dv.get("localUsage") or 0, dv.get("capacityLimit")
+            # The percentage is a ratio of two figures in the same unit, so it
+            # is safe whatever that unit is. The absolute figures are not, so
+            # they are formatted in the unit the tenant reported rather than
+            # assumed to be bytes.
             pct = used / lim * 100 if lim else 0
             over = used - lim
-            status = (f"OVERAGE by {human_bytes(over)}" if dv.get("overage") and over > 0
+            amount = qcap.meter_amount
+            status = (f"OVERAGE by {amount(dv, over)}" if dv.get("overage") and over > 0
                       else ("close to limit" if dv.get("closeToOverage") else "ok"))
             meter = Meter(warn_at=90, over_at=100)
-            meter.set(pct, f"Data for Analysis (billed):  {human_bytes(used)} / {human_bytes(lim)}",
-                      status)
+            meter.set(pct, f"Data for Analysis (billed):  {amount(dv, used)} / "
+                           f"{amount(dv, lim)}", status)
             self.cap_dash.addWidget(meter)
         else:
             note = label("No authoritative billed meter (needs a tenant-admin key) - "
