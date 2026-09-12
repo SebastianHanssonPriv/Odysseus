@@ -203,6 +203,17 @@ its script, or the hop cap was hit) — a lead to verify by hand, not a dead
 end. Same caveat as Usage analysis: "used in a report" is detected by
 text-matching expressions, so a field referenced only through a dynamic
 `$(...)` expression can be wrongly marked unused — verify before deleting.
+
+What "used in a report" now reads. Every expression-bearing property of every
+object on every sheet, found by walking the object's whole property tree rather
+than four known paths. That means colour-by-expression, segment colours,
+dynamic labels, show/hide and calculation conditions, sort-by expressions,
+subtitles and footnotes, and properties invented by extension objects all count
+as usage. It used to read only a chart's inline dimension and measure
+definitions plus its title, so a field used solely to colour a bar, or to
+decide whether a chart appears, was reported as an unused candidate. A dynamic
+`$(...)` expression is still opaque — that caveat is unchanged and no text
+parse can close it.
 Space type is read from Qlik Cloud's Spaces API as-is; confirm actual access
 level in the Qlik admin console before relying on it.
 

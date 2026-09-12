@@ -482,6 +482,60 @@ def fetch_scripts(tenant, api_key, guids, workers=SCRIPT_WORKERS, log=None,
     return out
 
 
+# Keys whose string values are Qlik expressions. Matched rather than
+# enumerated because extension objects invent their own property names, and an
+# expression missed here is a field reported as unused that is not.
+_EXPR_KEYS = {"qdef", "qv", "qfielddefs"}
+_EXPR_KEY_HINT = re.compile(r"(?i)expr|condition")
+
+
+def _harvest_expressions(node, exprs, libs, wanted=False, depth=0):
+    """Every expression string and master-item id anywhere in an object's
+    property tree.
+
+    _walk_struct used to read four paths: hypercube dimensions and measures,
+    list objects, and the title. Everything else an object can hold an
+    expression in was invisible, and each of these is ordinary Qlik:
+
+      colour by expression      qAttributeExpressions
+      segment colours           qAttributeDimensions
+      dynamic labels            qLabelExpression
+      show / hide a chart       qShowCondition, qCalcCondition
+      sort by expression        qSortByExpression
+      subtitle and footnote     qStringExpression
+      anything in an extension  its own property names
+
+    A field referenced only in one of those was reported as an unused
+    candidate, which is the one error this report must not make: someone
+    deletes the field and the chart breaks.
+
+    `wanted` is re-evaluated at each dict key and inherited only through lists,
+    so `qDef: {qFieldDefs: [...], qLabel: "Sales"}` harvests the field defs and
+    not the label. Sweeping in labels too would mark a single-word field used
+    because a caption happened to contain the word.
+    """
+    if depth > 24:
+        return
+    if isinstance(node, str):
+        if wanted and node.strip():
+            exprs.append(node)
+        return
+    if isinstance(node, list):
+        for v in node:
+            _harvest_expressions(v, exprs, libs, wanted, depth + 1)
+        return
+    if isinstance(node, dict):
+        for k, v in node.items():
+            kl = str(k).lower()
+            if kl == "qlibraryid":
+                if isinstance(v, str) and v:
+                    libs.add(v)
+                continue
+            _harvest_expressions(
+                v, exprs, libs,
+                kl in _EXPR_KEYS or bool(_EXPR_KEY_HINT.search(kl)), depth + 1)
+
+
 class QlikExporter:
     def __init__(self, tenant, api_key, app_id, output_dir, log):
         self.tenant = normalize_host(tenant)
@@ -709,6 +763,7 @@ class QlikExporter:
         self.log(f"Exported {len(rows)} visual objects across {len(sheets)} sheets -> {os.path.basename(path)}")
 
     # --- structured objects (for usage analysis) ---
+
     @staticmethod
     def _walk_struct(prop, sheet_title, rows):
         info = prop.get("qInfo", {})
@@ -739,14 +794,23 @@ class QlikExporter:
         title = prop.get("title", "")
         if isinstance(title, dict):
             te = title.get("qStringExpression", {}).get("qExpr", "")
-            if te:
-                exprs.append(te)
             title = te
+        # The typed reads above give the measure/dimension distinction, which a
+        # generic walk cannot. This adds everything they do not reach, and any
+        # master item referenced from somewhere they do not look. Extra library
+        # ids go in dim_libs because analyze_master_usage merges the two lists
+        # and matches on id - the bucket carries no meaning of its own.
+        extra, libs = [], set()
+        _harvest_expressions(prop, extra, libs)
+        exprs.extend(extra)
+        known = set(measure_libs) | set(dim_libs)
+        dim_libs.extend(sorted(libs - known))
         if viz:
             rows.append({"sheet": sheet_title, "id": info.get("qId", ""), "type": viz,
                          "title": title if isinstance(title, str) else "",
                          "measure_libs": measure_libs, "dim_libs": dim_libs,
-                         "expressions": [e for e in exprs if e]})
+                         # de-duplicated: the typed reads and the sweep overlap
+                         "expressions": sorted({e for e in exprs if e})})
 
     def fetch_objects(self, app_h):
         sheet_def = {"qInfo": {"qType": "SheetList"},
