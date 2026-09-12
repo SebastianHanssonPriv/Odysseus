@@ -47,10 +47,21 @@ STATE_NOT_NARROWED = "dataflow columns not narrowed"
 STATE_DROPPED = "in the dataflow, not in the model"
 STATE_IN_MODEL_UNUSED = "in model, no DAX reference"
 STATE_IN_MODEL_USED = "in model, referenced by DAX"
+# The dataset returned no DAX at all, so "no DAX reference" cannot be
+# distinguished from "no DAX to check against". Ranked above UNUSED because it
+# is a gap in the evidence, not a finding, and must never read as a candidate
+# to drop.
+STATE_DAX_UNKNOWN = "in model, DAX usage not known"
 
 STATE_ORDER = [STATE_UNRESOLVED, STATE_NOT_NARROWED, STATE_DROPPED,
-               STATE_IN_MODEL_UNUSED, STATE_IN_MODEL_USED]
+               STATE_IN_MODEL_UNUSED, STATE_DAX_UNKNOWN, STATE_IN_MODEL_USED]
 _RANK = {s: i for i, s in enumerate(STATE_ORDER)}
+
+# The states that mean "this field is a column of the model table". Whether the
+# DAX check could run is a separate question from whether the column is there,
+# and conflating them made a column in a DAX-less dataset read as not reaching
+# a model at all.
+_IN_THE_MODEL = (STATE_IN_MODEL_USED, STATE_IN_MODEL_UNUSED, STATE_DAX_UNKNOWN)
 
 STATE_HELP = {
     STATE_IN_MODEL_USED: "A column of the model table, and a measure or calculated column's DAX "
@@ -66,6 +77,12 @@ STATE_HELP = {
                         "fields it carries cannot be read from it. The model's own columns are "
                         "still listed; anything the dataflow carried and the model dropped is "
                         "simply unknown.",
+    STATE_DAX_UNKNOWN: "A column of the model table, in a dataset that returned no DAX "
+                       "expressions at all - so there was nothing to check it against. Either "
+                       "the dataset holds no measures and no calculated columns, or the tenant "
+                       "setting 'Enhance admin APIs responses with DAX and mashup expressions' "
+                       "is off. A gap in the evidence, not a finding, and never a reason to "
+                       "drop a column.",
     STATE_UNRESOLVED: "The table's source could not be resolved far enough to say - see the "
                       "status column and the Model lineage report's warning sheet.",
 }
@@ -209,8 +226,10 @@ def scan_dataflow_impact(lineage, reports=(), views=None, window_days=None, log=
             name = c.get("column") or ""
             if not name:
                 continue
+            dax = c.get("used_in_dax")
             state = (STATE_UNRESOLVED if unresolved and not cols else
-                     (STATE_IN_MODEL_USED if c.get("used_in_dax") else STATE_IN_MODEL_UNUSED))
+                     STATE_DAX_UNKNOWN if dax is None else
+                     STATE_IN_MODEL_USED if dax else STATE_IN_MODEL_UNUSED)
             reach.append(dict(common, field=name, model_column=name, state=state))
 
         # Fields the dataflow selected that never became a model column.
@@ -276,13 +295,13 @@ def scan_dataflow_impact(lineage, reports=(), views=None, window_days=None, log=
         # so inheriting a High tier from the model that dropped it would read
         # as "this matters a lot" when the truth is the opposite.
         tiers = [r["dataset_tier"] for r in rows if r["dataset_tier"]
-                 and r["state"] in (STATE_IN_MODEL_USED, STATE_IN_MODEL_UNUSED)]
+                 and r["state"] in _IN_THE_MODEL]
         top = ("High" if "High" in tiers else
                ("Medium" if "Medium" in tiers else ("Low" if tiers else "")))
         fields.append({
             "entity": entity, "field": fname,
             "has_impact": best == STATE_IN_MODEL_USED,
-            "reaches_a_model": best in (STATE_IN_MODEL_USED, STATE_IN_MODEL_UNUSED),
+            "reaches_a_model": best in _IN_THE_MODEL,
             "datasets": len({r["dataset_id"] for r in rows}),
             "best_state": best, "states": ", ".join(sorted(set(states))),
             "top_tier": top,
@@ -352,6 +371,7 @@ def render_text(result):
     impact = sum(1 for r in f if r["has_impact"])
     carried = sum(1 for r in f if r["best_state"] == STATE_IN_MODEL_UNUSED)
     dropped = sum(1 for r in f if r["best_state"] == STATE_DROPPED)
+    dax_unknown = sum(1 for r in f if r["best_state"] == STATE_DAX_UNKNOWN)
     lines = [
         "DATAFLOW FIELD IMPACT",
         "",
@@ -365,6 +385,8 @@ def render_text(result):
         "Of those fields, at their strongest state anywhere:",
         f"  {impact:6}  in a model and referenced by DAX",
         f"  {carried:6}  in a model with no DAX reference (check before dropping)",
+        f"  {dax_unknown:6}  in a model whose dataset returned no DAX at all "
+        f"(nothing to check against - not a finding)",
         f"  {dropped:6}  selected by the dataflow but absent from every model",
         "",
     ]

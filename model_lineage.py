@@ -17,9 +17,15 @@ import os
 import re
 from dataclasses import asdict, dataclass, field
 
-from dataflow_admin import export_dataflow
 from mashup_parser import MAX_REFERENCE_DEPTH, resolve_source, split_shared_queries
-from scanner import list_workspace_ids, scan_workspaces
+
+# dataflow_admin and scanner are imported where they are used, not here. Both
+# reach powerbi_client -> auth -> azure.identity -> cryptography, so importing
+# them at module load made every function in this file - the M-code parsing,
+# the DAX reference check, the report writers, none of which touch a network -
+# unloadable unless the whole Azure auth stack imports cleanly. It also meant
+# paying that import cost on app start. The functions that genuinely call
+# Power BI import them on the way in.
 
 # Dataflow-boundary hops (dataset -> dataflow -> dataflow -> ...) are capped
 # independently of mashup_parser's own same-document reference-chasing cap,
@@ -52,6 +58,7 @@ class DataflowCache:
     def queries_for(self, dataflow_id: str) -> dict[str, str] | None:
         if dataflow_id not in self._queries:
             try:
+                from dataflow_admin import export_dataflow
                 definition = export_dataflow(self._client, dataflow_id)
                 document = definition.get("pbi:mashup", {}).get("document", "")
                 if not document:
@@ -192,6 +199,7 @@ def scan_model_lineage(client, scan_timeout_seconds=600, cancel_check=None, log=
     instead of walking the tenant twice. Existing callers pass nothing and
     see no change."""
     dataflow_cache = DataflowCache(client)
+    from scanner import list_workspace_ids, scan_workspaces
     workspace_ids = list(list_workspace_ids(client))
     results = []
     batch_errors = 0
@@ -247,6 +255,34 @@ def scan_model_lineage(client, scan_timeout_seconds=600, cancel_check=None, log=
 _DAX_BRACKET_RE = re.compile(r"\[([^\]]+)\]")
 
 
+def dax_expression_count(tables):
+    """How many DAX expressions the Scanner API actually returned for this
+    dataset, across measures and calculated columns.
+
+    This is the difference between a signal and no signal. When the tenant
+    setting "Enhance admin APIs responses with DAX and mashup expressions" is
+    off, every expression comes back empty, dax_referenced_fields returns an
+    empty set, and every column in every dataset is then marked "no DAX
+    reference" - a whole-tenant claim that nothing is used, built on the fact
+    that nothing was returned. Zero here means the check could not run, not
+    that the check passed.
+
+    A dataset can also legitimately hold no measures and no calculated
+    columns, and the two cases are indistinguishable from this count alone.
+    Both mean the same thing for the reader: this dataset yields no DAX
+    usage evidence either way.
+    """
+    n = 0
+    for t in tables:
+        for col in (t.get("columns") or []):
+            if col.get("expression"):
+                n += 1
+        for m_ in (t.get("measures") or []):
+            if m_.get("expression"):
+                n += 1
+    return n
+
+
 def dax_referenced_fields(tables):
     """Every column name referenced by any calculated column or measure's
     DAX expression anywhere in a dataset's tables (DAX allows cross-table
@@ -274,13 +310,20 @@ def dax_referenced_fields(tables):
     return refs
 
 
-def _column_usage_for_table(table, dax_refs):
+def _column_usage_for_table(table, dax_refs, has_dax=True):
     """Every column the Scanner API lists on this model table (from dataset
     schema detail, independent of whether this table's own warehouse source
     could be resolved), and whether it is DAX-referenced anywhere in the
-    dataset."""
-    return [{"column": c.get("name", ""), "used_in_dax": (c.get("name") or "").lower() in dax_refs}
-           for c in (table.get("columns") or []) if c.get("name")]
+    dataset.
+
+    used_in_dax is None, not False, when the dataset returned no DAX at all.
+    False has to mean "DAX exists and does not mention this column"; without
+    that distinction the report says nothing is used whenever the tenant
+    setting that exposes DAX is switched off.
+    """
+    return [{"column": c.get("name", ""),
+             "used_in_dax": ((c.get("name") or "").lower() in dax_refs if has_dax else None)}
+            for c in (table.get("columns") or []) if c.get("name")]
 
 
 def _resolve_workspace_datasets(workspace, dataflow_cache, log):
@@ -301,6 +344,10 @@ def _resolve_workspace_datasets(workspace, dataflow_cache, log):
             continue
         dataset_siblings = _dataset_sibling_expressions(tables)
         dax_refs = dax_referenced_fields(tables)
+        n_dax = dax_expression_count(tables)
+        if not n_dax:
+            log(f"  {workspace_name} / {dataset_name}: no DAX expressions returned - "
+                f"column usage is reported as unknown, not as unused.")
 
         for table in tables:
             table_name = table.get("name", "")
@@ -316,7 +363,7 @@ def _resolve_workspace_datasets(workspace, dataflow_cache, log):
                     workspace_id, workspace_name, dataset_id, dataset_name, table_name,
                     expression, dataset_siblings, dataflow_cache,
                 )
-            result.column_usage = _column_usage_for_table(table, dax_refs)
+            result.column_usage = _column_usage_for_table(table, dax_refs, has_dax=bool(n_dax))
             results.append(asdict(result))
         if tables:
             log(f"  {workspace_name} / {dataset_name}: {len(tables)} table(s) resolved")
@@ -352,8 +399,14 @@ def render_model_lineage_text(results):
     for status, n in sorted(counts.items(), key=lambda kv: -kv[1]):
         lines.append(f"  {status}: {n}")
     if all_cols:
+        unknown = sum(1 for cu in all_cols if cu["used_in_dax"] is None)
         lines.append(f"  Columns: {len(all_cols)} total, {used_cols} referenced by a DAX "
                      f"calculation (measure or calculated column) somewhere in their dataset")
+        if unknown:
+            lines.append(f"    {unknown} column(s) in dataset(s) that returned NO DAX at all - "
+                         f"reported as not known rather than unused. Either those datasets hold "
+                         f"no measures and no calculated columns, or the tenant setting "
+                         f"'Enhance admin APIs responses with DAX and mashup expressions' is off.")
     source_rows = _build_source_usage(results)
     if source_rows:
         top = source_rows[0]
@@ -430,11 +483,14 @@ def write_model_lineage_report(results, out_dir, log):
     column_headers = ["Workspace", "Dataset", "Table", "Column", "Used in a DAX calculation"]
     column_rows = [
         [r["workspace_name"], r["dataset_name"], r["table_name"], cu["column"],
-         "Yes" if cu["used_in_dax"] else "No"]
+         # None means the dataset returned no DAX at all, so "No" would be a
+         # claim the data cannot support.
+         {True: "Yes", False: "No", None: "not known - no DAX returned"}[cu["used_in_dax"]]]
         for r in results for cu in (r.get("column_usage") or [])
     ]
     total_cols = len(column_rows)
     used_cols = sum(1 for r in column_rows if r[-1] == "Yes")
+    unknown_cols = sum(1 for r in column_rows if r[-1].startswith("not known"))
 
     source_headers = ["Connector", "Source table/view", "Used by N table(s)"]
     source_rows = _build_source_usage(results)

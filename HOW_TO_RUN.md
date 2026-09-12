@@ -374,6 +374,16 @@ Same shape as the Qlik workspace: a hub of five tasks, one page each, with
   environment — a baseline ahead of the move to Fabric and Gen2 dataflows;
   see model_lineage.py if that adds Gen2 support later.
 
+**Why there is a third state.** With that tenant setting off, every DAX
+expression comes back empty. The reference check then finds nothing, and
+*every column in every dataset* used to be reported as having no DAX
+reference — a tenant-wide claim that nothing is used, built entirely on the
+fact that nothing was returned. Model lineage and Dataflow field impact now
+count the DAX expressions a dataset actually returned: zero means the check
+could not run, and those columns read `not known` rather than `No`. The log
+says which datasets those were while the scan runs.
+
+
 ### Dataflow field impact
 The Power BI counterpart of **Landed QVD impact**. A Gen1 dataflow entity is
 Power BI's answer to a QVD — a table staged by a separate artifact and then
@@ -387,6 +397,7 @@ Each field gets one of five states **per model table**:
 |---|---|
 | `in model, referenced by DAX` | A column of the model table, and a measure or calculated column's DAX references it. This is "has impact". |
 | `in model, no DAX reference` | A column of the model table with no DAX reference anywhere in the dataset. **A shortlist to check, not a finding** — see the limit below. |
+| `in model, DAX usage not known` | A column of the model table in a dataset that returned **no DAX at all**, so there was nothing to check it against. Either the dataset holds no measures and no calculated columns, or the tenant setting *Enhance admin APIs responses with DAX and mashup expressions* is off. A gap in the evidence, never a reason to drop a column. |
 | `in the dataflow, not in the model` | The dataflow's M code selects the field but no model table exposes a column by that name: dropped, renamed, or folded into something else. |
 | `dataflow columns not narrowed` | The dataflow's M code passes everything through, so what it carries cannot be read from it. The model's own columns are still listed. |
 | `source not resolved` | The table's source could not be chased far enough to say. |
