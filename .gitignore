@@ -1,2 +1,10 @@
+# Throwaway API probes. qlik_audit_probe_run.py has a live tenant API key
+# pasted into it, so nothing matching this pattern may ever be committed.
+*_probe.py
+*_probe_run.py
+
 __pycache__/
 *.pyc
+build/
+dist/
+*.spec.bak

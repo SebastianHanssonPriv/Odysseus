@@ -20,14 +20,14 @@ import threading
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit,
+    QWidget, QVBoxLayout, QGridLayout, QLabel, QLineEdit,
     QPushButton, QComboBox, QFileDialog, QMessageBox, QFrame, QScrollArea,
     QButtonGroup,
 )
 
 import sharepoint
 from widgets import (
-    BAR, LINE, GOOD, BAD, ActionBar, make_card, label, head_label, tip,
+    GOOD, BAD, ActionBar, make_card, label, top_bar, tip,
 )
 
 PBI_AUTH_MODES = ["Client secret (in-memory)", "Key Vault", "Managed identity"]
@@ -72,12 +72,7 @@ class SettingsView(QWidget):
         self._show_section(0)
 
     def _build_subnav(self):
-        bar = QFrame()
-        bar.setStyleSheet(f"background: {BAR}; border: none; border-bottom: 1px solid {LINE};")
-        lay = QHBoxLayout(bar)
-        lay.setContentsMargins(10, 5, 10, 5)
-        lay.setSpacing(8)
-        lay.addWidget(head_label("Settings", 12))
+        bar, lay = top_bar("Settings")
         lay.addSpacing(8)
         group = QButtonGroup(self)
         group.setExclusive(True)

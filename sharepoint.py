@@ -24,7 +24,6 @@ No GUI imports.
 from __future__ import annotations
 
 import os
-import re
 import urllib.parse
 
 # The document library segment in a SharePoint URL. "Shared Documents" is the

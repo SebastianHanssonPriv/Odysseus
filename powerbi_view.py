@@ -20,9 +20,9 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QDate
+from PySide6.QtCore import Signal, QDate
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox, QComboBox,
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QCheckBox, QComboBox,
     QDateEdit, QScrollArea, QMessageBox, QPlainTextEdit,
 )
 
@@ -30,7 +30,7 @@ from config import Settings
 import reports
 import pbi_landed
 from widgets import (
-    TEAL, WARN, GOOD, BAD, ActionBar, Banner, TaskHub, make_card, label, tip, kpi_row,
+    ACCENT, GOOD, ActionBar, Banner, TaskHub, make_card, label, tip, kpi_row,
     line_chart,
     ranked_bars,
     colored_table, clear_layout,
@@ -806,10 +806,10 @@ class PowerBIView(QWidget):
         self.usage_dash.addWidget(label("Scope: " + " · ".join(scope), "muted"))
 
         specs = [
-            ("Total views", f"{agg['total']:,}", "recorded views", TEAL),
+            ("Total views", f"{agg['total']:,}", "recorded views", ACCENT),
             ("Active users", f"{agg['active_users']:,}", "with ≥1 view", GOOD),
-            ("Reports viewed", f"{agg['reports_viewed']:,}", "distinct", TEAL),
-            ("Avg views / user", f"{avg:,.1f}", "engagement", TEAL),
+            ("Reports viewed", f"{agg['reports_viewed']:,}", "distinct", ACCENT),
+            ("Avg views / user", f"{avg:,.1f}", "engagement", ACCENT),
         ]
         row, _ = kpi_row(specs)
         self.usage_dash.addWidget(row)
@@ -820,7 +820,7 @@ class PowerBIView(QWidget):
         bars = QHBoxLayout()
         rep_items = [((d["report"] if ws or rid else f'{d["report"]}  ·  {d["workspace"]}'), d["views"])
                      for d in rep_sorted]
-        bars.addWidget(ranked_bars("Top reports by views", rep_items, colour=TEAL, max_n=10), 1)
+        bars.addWidget(ranked_bars("Top reports by views", rep_items, colour=ACCENT, max_n=10), 1)
         usr_items = [(u.split("@")[0], d["views"]) for u, d in usr_sorted]
         bars.addWidget(ranked_bars("Top users by views", usr_items, colour=GOOD, max_n=10), 1)
         bw = QWidget()
@@ -831,7 +831,7 @@ class PowerBIView(QWidget):
         daily = sorted(agg["daily"].items())
         if daily:
             self.usage_dash.addWidget(line_chart(
-                "Views per day", [d for d, _ in daily], [v for _, v in daily], colour=TEAL))
+                "Views per day", [d for d, _ in daily], [v for _, v in daily], colour=ACCENT))
 
         # reports table (sorted by views desc) with stale flag
         self.usage_dash.addWidget(label("REPORTS  (most used first; rows tinted by days since last "

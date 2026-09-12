@@ -29,10 +29,10 @@ import qlik_landed as landed
 import reports
 from scope_sheet import ScopeBar
 from widgets import (
-    TEAL, BAD, WARN, GOOD, ActionBar, TaskHub,
+    ACCENT, BAD, WARN, GOOD, ActionBar, TaskHub,
     make_card, label, tip, Banner,
     key_format_ok, scrub, friendly_load_error, human_bytes,
-    MeterBar, kpi_row, ranked_bars, colored_table, clear_layout,
+    Meter, kpi_row, ranked_bars, colored_table, clear_layout,
 )
 
 # light row tints for the colour-coded action list
@@ -962,7 +962,7 @@ class QlikView(QWidget):
             over = used - lim
             status = (f"OVERAGE by {human_bytes(over)}" if dv.get("overage") and over > 0
                       else ("close to limit" if dv.get("closeToOverage") else "ok"))
-            meter = MeterBar(warn_at=90, over_at=100)
+            meter = Meter(warn_at=90, over_at=100)
             meter.set(pct, f"Data for Analysis (billed):  {human_bytes(used)} / {human_bytes(lim)}",
                       status)
             self.cap_dash.addWidget(meter)
@@ -977,15 +977,15 @@ class QlikView(QWidget):
         top_space = spaces_billable[0] if spaces_billable else None
         specs = [
             ("Billable app data", human_bytes(persum.get("billable_bytes", 0)),
-             f"{persum.get('billable_count', 0)} apps  ·  proxy", TEAL),
+             f"{persum.get('billable_count', 0)} apps  ·  proxy", ACCENT),
             ("Duplicate reclaim", human_bytes(dup_reclaim),
              f"{len(arr.get('duplicate_app_clusters', []))} clusters if consolidated", WARN),
             ("Apps sized", str(ai.get("totals", {}).get("sized_app_count", 0)),
-             f"of {ai.get('totals', {}).get('app_count', 0)} apps", TEAL),
+             f"of {ai.get('totals', {}).get('app_count', 0)} apps", ACCENT),
         ]
         if top_space:
             specs.append(("Top billable space", top_space["space"],
-                          f"{human_bytes(top_space['bytes'])} · {top_space['app_count']} apps", TEAL))
+                          f"{human_bytes(top_space['bytes'])} · {top_space['app_count']} apps", ACCENT))
         if orph:
             rc = orph.get("reclaimable", {})
             tot = (rc.get("orphan_file_bytes", 0) + rc.get("produced_only_bytes", 0)
@@ -1007,7 +1007,7 @@ class QlikView(QWidget):
             charts.addWidget(ranked_bars(
                 "Billable app data by space",
                 [(s["space"], s["bytes"]) for s in sp],
-                colour=TEAL, max_n=10, value_fmt=human_bytes), 1)
+                colour=ACCENT, max_n=10, value_fmt=human_bytes), 1)
         if dups or sp:
             cw = QWidget()
             cw.setLayout(charts)
@@ -1136,7 +1136,7 @@ class QlikView(QWidget):
              WARN if master["unused"] else GOOD),
             ("Unused variables", str(len(variables["unused"])), "front-end only",
              WARN if variables["unused"] else GOOD),
-            ("Dynamic $()", str(len(dyn)), f"{active} active $(=...)", BAD if active else TEAL),
+            ("Dynamic $()", str(len(dyn)), f"{active} active $(=...)", BAD if active else ACCENT),
         ]
         row, _ = kpi_row(specs)
         self.usage_dash_q.addWidget(row)
@@ -1529,32 +1529,23 @@ class QlikView(QWidget):
             self.log(f"  {len(apps)} app(s) on the tenant.")
             self.shell.run_step(1, f"{len(apps)} apps")
 
-            seen = [0]
+            # The cheap half for every app, fetched concurrently: one engine
+            # session per app is almost all network wait, so reading them one
+            # at a time is minutes of pure latency on a tenant this size.
+            scripts = core.fetch_scripts(
+                tenant, key, [a["guid"] for a in apps],
+                log=self.shell.sig_log.emit,
+                should_cancel=self.shell.cancel_requested,
+                on_progress=lambda d, t: self.shell.run_progress(d, t, "apps read"))
+            if self.shell.cancel_requested():
+                self.log("Landed impact scan cancelled - no report written.")
+                return
 
             def _open(guid, _t=tenant, _k=key, _o=out_dir):
                 exp = core.QlikExporter(_t, _k, guid, _o, self.shell.sig_log.emit)
                 exp.connect()
                 h = exp.call(-1, "OpenDoc", [guid])["qReturn"]["qHandle"]
                 return exp, h
-
-            def read_script(guid, _k=key):
-                """The cheap half, fetched for every app: just the load script.
-
-                Returns None only when the app could not be opened at all, so
-                the scan can tell 'no script' from 'no access' - an empty
-                script is a valid answer and must not be read as a failure."""
-                seen[0] += 1
-                self.shell.run_progress(seen[0], len(apps), "apps read")
-                exp = None
-                try:
-                    exp, h = _open(guid)
-                    return exp.fetch_script(h) or ""
-                except Exception as e:
-                    self.shell.sig_log.emit(f"  (could not open {guid}: {scrub(_k, e)})")
-                    return None
-                finally:
-                    if exp is not None:
-                        exp.close()
 
             def read_detail(guid, _k=key):
                 """The expensive half, fetched only for an app that actually
@@ -1581,7 +1572,7 @@ class QlikView(QWidget):
                     if exp is not None:
                         exp.close()
 
-            res = landed.scan_landed_impact(apps, read_script, read_detail,
+            res = landed.scan_landed_impact(apps, scripts, read_detail,
                                             log=self.shell.sig_log.emit,
                                             cancel_check=self.shell.cancel_requested)
             if res is None:

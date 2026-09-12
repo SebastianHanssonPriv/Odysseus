@@ -12,7 +12,7 @@ selection.
 """
 from __future__ import annotations
 
-import datetime
+import fmt
 
 from PySide6.QtCore import Qt, QEvent
 from PySide6.QtGui import QColor, QBrush
@@ -24,17 +24,7 @@ from PySide6.QtWidgets import (
 from widgets import ROW_HOVER, MUTED, ElidedLabel, head_label, tip
 
 
-def _days_since(iso):
-    """Whole days since an ISO timestamp, or None if it is absent/unparseable."""
-    if not iso:
-        return None
-    try:
-        text = str(iso).replace("Z", "+00:00")
-        dt = datetime.datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    now = datetime.datetime.now(dt.tzinfo) if dt.tzinfo else datetime.datetime.now()
-    return max(0, (now - dt).days)
+_days_since = fmt.days_since          # one implementation, see fmt.py
 
 
 def _ago(iso):

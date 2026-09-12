@@ -13,6 +13,7 @@ import urllib.request
 import urllib.parse
 import urllib.error
 import html
+import concurrent.futures
 import websocket  # pip install websocket-client
 
 
@@ -102,6 +103,17 @@ def list_published_apps(tenant, api_key):
     sessions. One lightweight REST call per app; a call that fails excludes
     that app rather than guessing its publish state."""
     apps = list_apps(tenant, api_key)
+    # list_apps already reads the Items payload, which normally carries the
+    # publish state - so filter on that first and make no extra calls at all.
+    # It is best-effort (Qlik has moved the field between API versions), so
+    # "nothing came back published" is treated as "the payload did not say"
+    # rather than "this tenant publishes nothing", and falls through to the
+    # per-app check. That fallback is one REST call per app: on a tenant with
+    # a couple of thousand apps it is thousands of sequential round trips,
+    # which is exactly why the cheap path is tried first.
+    cheap = [a for a in apps if a.get("published")]
+    if cheap:
+        return cheap
     out = []
     for a in apps:
         try:
@@ -248,6 +260,84 @@ def list_data_files(tenant, api_key):
 # ============================================================
 #  Core export logic (UI-independent)
 # ============================================================
+SCRIPT_WORKERS = 6          # concurrent engine sessions for a bulk script read
+
+
+def fetch_scripts(tenant, api_key, guids, workers=SCRIPT_WORKERS, log=None,
+                  should_cancel=None, on_progress=None, errors=None):
+    """Read many apps' load scripts. Returns {guid: script} - a guid maps to
+    None when the app could not be opened at all, which a caller must be able
+    to tell apart from an app whose script is empty.
+
+    Reading a script is one WebSocket handshake, one OpenDoc and one GetScript:
+    almost entirely time spent waiting on the network, and every app is
+    independent. Done one at a time that is minutes of pure latency on a
+    tenant with a couple of thousand apps, so this runs `workers` sessions at
+    once. It is safe because QlikExporter keeps all of its state on the
+    instance - its own socket, its own request-id counter - and each task
+    builds its own.
+
+    `workers` is deliberately modest rather than "as many as possible": the
+    limit that matters is the tenant's concurrent-session and rate limits, not
+    the local CPU, and a scan that trips them is slower than one that does
+    not.
+
+    `errors`, if a dict is passed, is filled with {guid: message} for each app
+    that could not be read, for a caller that reports the reason rather than
+    just the count.
+    """
+    log = log or (lambda _m: None)
+    guids = list(guids)
+    out = {}
+    if not guids:
+        return out
+
+    def one(guid):
+        for attempt in range(2):          # one retry for a transient blip
+            if should_cancel and should_cancel():
+                return None
+            exp = QlikExporter(tenant, api_key, guid, "", log=lambda *_: None)
+            try:
+                exp.connect()
+                h = exp.call(-1, "OpenDoc", [guid])["qReturn"]["qHandle"]
+                return exp.fetch_script(h) or ""
+            except Exception as e:
+                if attempt == 1:
+                    msg = str(getattr(e, "reason", e))[:200]
+                    if errors is not None:
+                        errors[guid] = msg
+                    log(f"  (could not read {guid}: {msg})")
+            finally:
+                exp.close()
+        return None
+
+    done = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futures = {pool.submit(one, g): g for g in guids}
+        for fut in concurrent.futures.as_completed(futures):
+            guid = futures[fut]
+            try:
+                out[guid] = fut.result()
+            except Exception as e:        # a task must never take the run down
+                msg = str(getattr(e, "reason", e))[:200]
+                if errors is not None:
+                    errors[guid] = msg
+                log(f"  (script read failed for {guid}: {msg})")
+                out[guid] = None
+            done += 1
+            if on_progress:
+                on_progress(done, len(guids))
+            if done % 100 == 0:
+                log(f"  ... {done}/{len(guids)} scripts")
+            if should_cancel and should_cancel():
+                # Stop handing out new work; sessions already open finish and
+                # close cleanly rather than being abandoned mid-call.
+                for f in futures:
+                    f.cancel()
+                break
+    return out
+
+
 class QlikExporter:
     def __init__(self, tenant, api_key, app_id, output_dir, log):
         self.tenant = normalize_host(tenant)

@@ -7,15 +7,14 @@ side has no data yet, it shows a prompt + a button that jumps to that workspace.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QScrollArea, QFrame,
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QScrollArea,
 )
 
 import reports
 from widgets import (
-    TEAL, WARN, GOOD, BAD, make_card, label, head_label, human_bytes,
-    KpiCard, MeterBar, kpi_row, ranked_bars, clear_layout,
+    ACCENT, WARN, GOOD, make_card, label, head_label, human_bytes,
+    Meter, kpi_row, ranked_bars, clear_layout,
 )
 
 
@@ -115,7 +114,7 @@ class HomeView(QWidget):
             over = used - lim
             status = (f"OVERAGE by {human_bytes(over)}" if dv.get("overage") and over > 0
                       else ("close to limit" if dv.get("closeToOverage") else "ok"))
-            meter = MeterBar(warn_at=90, over_at=100)
+            meter = Meter(warn_at=90, over_at=100)
             meter.set(pct, f"Data for Analysis (billed):  {human_bytes(used)} / {human_bytes(lim)}",
                       status)
             lay.addWidget(meter)
@@ -124,11 +123,11 @@ class HomeView(QWidget):
         spaces_billable = [s for s in arr.get("space_usage", []) if s.get("billable")]
         specs = [
             ("Billable app data", human_bytes(persum.get("billable_bytes", 0)),
-             f"{persum.get('billable_count', 0)} apps", TEAL),
+             f"{persum.get('billable_count', 0)} apps", ACCENT),
             ("Duplicate reclaim", human_bytes(dup_reclaim),
              f"{len(arr.get('duplicate_app_clusters', []))} clusters", WARN),
             ("Apps sized", str(ai.get("totals", {}).get("sized_app_count", 0)),
-             f"of {ai.get('totals', {}).get('app_count', 0)}", TEAL),
+             f"of {ai.get('totals', {}).get('app_count', 0)}", ACCENT),
         ]
         row, _ = kpi_row(specs)
         lay.addWidget(row)
@@ -165,8 +164,8 @@ class HomeView(QWidget):
             return card
 
         specs = [
-            ("Total views", f"{res['total_views']:,}", f"over {res['days']} day(s)", TEAL),
-            ("Distinct reports", f"{res['distinct_reports']:,}", "viewed", TEAL),
+            ("Total views", f"{res['total_views']:,}", f"over {res['days']} day(s)", ACCENT),
+            ("Distinct reports", f"{res['distinct_reports']:,}", "viewed", ACCENT),
             ("Active users", f"{res['distinct_users']:,}", "≥1 view", GOOD),
             ("Least-viewed", str(len(res.get("low_usage", []))), "to review", WARN),
         ]
@@ -177,5 +176,5 @@ class HomeView(QWidget):
             lay.addWidget(ranked_bars(
                 "Top reports by views",
                 [(n, v) for n, v in res["top_reports"][:6]],
-                colour=TEAL, max_n=6))
+                colour=ACCENT, max_n=6))
         return card

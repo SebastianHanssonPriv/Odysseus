@@ -71,6 +71,7 @@ python -m PyInstaller --onefile --windowed --name BufabBIGovernanceStudio ^
   --hidden-import settings_view ^
   --hidden-import qlik_landed ^
   --hidden-import pbi_landed ^
+  --hidden-import fmt ^
   studio_app.py
 if errorlevel 1 goto :error
 

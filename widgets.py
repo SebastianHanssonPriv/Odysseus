@@ -7,14 +7,12 @@ the Home / Qlik / Power BI views. No product logic lives here.
 Implements section 2 (visual tokens) and section 9 (reusable widgets) of
 REDESIGN_SPEC.md: square corners, hairline borders, transparent cards on a
 light ground, a steel accent, and one chart colour plus three status colours.
-
-The old token names (TEAL, CARD, BORDER, ...) are kept as aliases at the end
-of the palette block so the existing view modules keep importing cleanly while
-the structural parts of the redesign land separately.
 """
 from __future__ import annotations
 
 import html
+
+import fmt
 
 import os
 import urllib.error
@@ -69,10 +67,6 @@ TRACK     = "#DEDEE1"      # meter / rank-bar track
 
 # Back-compat aliases: the view modules still import these names. They now
 # resolve to the new system, so the old screens pick up the new look for free.
-TEAL = ACCENT
-TEAL_DARK = ACCENT_DEEP
-CARD = BG            # cards are transparent now - they read as line drawings
-BORDER = LINE
 
 # Type stacks. The TTFs are vendored into fonts/ and registered by load_fonts();
 # the stacks fall back to Segoe UI on their own if a face is missing.
@@ -254,14 +248,11 @@ def friendly_load_error(e):
     return "Could not load apps. Double-check the tenant and API key in Settings."
 
 
-def human_bytes(n):
-    """Compact byte formatter (matches qlik_capacity.format_bytes output style)."""
-    n = float(n or 0)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if abs(n) < 1024 or unit == "TB":
-            return f"{n:,.1f} {unit}" if unit != "B" else f"{int(n)} B"
-        n /= 1024
-    return f"{n:,.1f} TB"
+# One implementation in fmt.py, re-exported here under the name the GUI call
+# sites already use. It used to be written out three times, and a drift
+# between the copies made a report's delta disagree with the dashboard the
+# number came from.
+human_bytes = fmt.human_bytes
 
 
 def head_label(text, pt):
@@ -357,6 +348,19 @@ class Card(QFrame):
             p.drawLine(cx - half, cy, cx + half, cy)
             p.drawLine(cx, cy - half, cx, cy + half)
         p.end()
+
+
+def top_bar(title, pt=12):
+    """A page-heading bar: the BAR fill with a hairline under it, and the page
+    title already in it. Returns (frame, layout) so the caller fills the rest
+    of the row. Three pages had this same frame spelled out by hand."""
+    bar = QFrame()
+    bar.setStyleSheet(f"background: {BAR}; border: none; border-bottom: 1px solid {LINE};")
+    lay = QHBoxLayout(bar)
+    lay.setContentsMargins(10, 5, 10, 5)
+    lay.setSpacing(8)
+    lay.addWidget(head_label(title, pt))
+    return bar, lay
 
 
 def make_card(blueprint=False):
@@ -1011,6 +1015,3 @@ def clear_layout(lay):
 
 
 # Names the view modules still import.
-KpiCard = KpiTile
-MeterBar = Meter
-RankBar = RankRow

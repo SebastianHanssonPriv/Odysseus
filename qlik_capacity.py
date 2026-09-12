@@ -37,11 +37,14 @@ import csv
 import json
 import time
 import datetime
+
+import fmt
 import urllib.request
 import urllib.error
 
-from qlik_core import (normalize_host, list_apps, list_spaces, QlikExporter,
-                       parse_store_reads, extract_file_refs, parse_load_tables)
+from qlik_core import (normalize_host, list_apps, list_spaces,
+                       fetch_scripts, parse_store_reads, extract_file_refs,
+                       parse_load_tables)
 
 try:                                  # reuse qlik_core's date parser if present
     from qlik_core import _parse_dt
@@ -576,13 +579,7 @@ def analyze_capacity(inv, top_n=25, stale_days=120, shared_min_apps=3, recent_da
 
 
 # ----------------------------------------------------------------- presentation
-def format_bytes(n):
-    n = float(n or 0)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if abs(n) < 1024 or unit == "TB":
-            return f"{n:,.1f} {unit}" if unit != "B" else f"{int(n)} B"
-        n /= 1024
-    return f"{n:,.1f} TB"
+format_bytes = fmt.human_bytes        # one implementation, see fmt.py
 
 
 def _days_since(iso):
@@ -886,28 +883,20 @@ def build_consumption_index(tenant, api_key, apps=None, log=print, max_apps=None
         apps = list_apps(tenant, api_key)
     if max_apps:
         apps = apps[:max_apps]
-    consumed, produced, errors = set(), set(), []
+    consumed, produced = set(), set()
     log(f"Reading load scripts of {len(apps)} apps for the consumption index ...")
-    for i, a in enumerate(apps, 1):
-        _ck(should_cancel)
-        guid = a["guid"]
-        exp = QlikExporter(tenant, api_key, guid, ".", log=lambda *_: None)
-        script = ""
-        try:
-            exp.connect()
-            app_h = exp.call(-1, "OpenDoc", [guid])["qReturn"]["qHandle"]
-            script = exp.fetch_script(app_h)
-        except Exception as e:
-            errors.append({"app": a.get("name", ""), "guid": guid,
-                           "error": str(getattr(e, "reason", e))[:200]})
-        finally:
-            exp.close()
+    failures = {}
+    scripts = fetch_scripts(tenant, api_key, [a["guid"] for a in apps], log=log,
+                            should_cancel=should_cancel, errors=failures)
+    _ck(should_cancel)
+    for a in apps:
+        script = scripts.get(a["guid"])
         if script:
             stores, _reads = parse_store_reads(script)          # STORE ... INTO *.qvd
             produced |= stores
             consumed |= (extract_file_refs(script) - stores)    # everything read, not written
-        if i % 25 == 0 or i == len(apps):
-            log(f"  ... {i}/{len(apps)} scripts")
+    errors = [{"app": a.get("name", ""), "guid": a["guid"], "error": failures[a["guid"]]}
+              for a in apps if a["guid"] in failures]
     return {"consumed": consumed, "produced": produced,
             "scripts_read": len(apps) - len(errors), "errors": errors}
 
@@ -1006,40 +995,32 @@ def scan_app_load_profiles(tenant, api_key, apps, log=print, max_apps=None, shou
     - loads_external -> the app contributes to the APP bucket (external data ingest)
     - creates_export -> the QVDs it STOREs contribute to the datafile bucket
     - stores/reads also feed orphan detection, so this single pass serves both.
-    Slow: one engine GetScript per app. With max_apps=None it reads every app."""
+    The scripts are fetched concurrently (see qlik_core.fetch_scripts) because
+    each one is a separate engine session and almost all of the time is spent
+    waiting on the network. With max_apps=None it reads every app."""
     items = [a for a in apps if a.get("guid")]
     if max_apps:
         items = items[:max_apps]
-    out, errors = {}, 0
     log(f"Reading {len(items)} app load scripts (external-load + export profile) ...")
-    for i, a in enumerate(items, 1):
-        _ck(should_cancel)
+    scripts = fetch_scripts(tenant, api_key, [a["guid"] for a in items],
+                            log=log, should_cancel=should_cancel)
+    _ck(should_cancel)
+    out, errors = {}, 0
+    for a in items:
         guid = a["guid"]
-        script = ""
-        for attempt in range(2):                 # one retry for a transient blip
-            exp = QlikExporter(tenant, api_key, guid, ".", log=lambda *_: None)
-            try:
-                exp.connect()
-                app_h = exp.call(-1, "OpenDoc", [guid])["qReturn"]["qHandle"]
-                script = exp.fetch_script(app_h)
-                break
-            except Exception:
-                if attempt == 0:
-                    time.sleep(1.0)
-            finally:
-                exp.close()
-        if not script:
-            errors += 1
+        script = scripts.get(guid)
         if script:
             ext, kind = _classify_external_load(script)
             stores, _r = parse_store_reads(script)
             reads = extract_file_refs(script) - stores
         else:
+            # None (could not open) and "" (genuinely empty) both leave the
+            # app unclassified, but only the first is an error worth counting.
+            if script is None:
+                errors += 1
             ext, kind, stores, reads = None, "unread", set(), set()
         out[guid] = {"loads_external": ext, "source_kind": kind,
                      "creates_export": bool(stores), "stores": stores, "reads": reads}
-        if i % 50 == 0 or i == len(items):
-            log(f"  ... {i}/{len(items)} scripts")
     if errors:
         log(f"  ({errors} scripts could not be read - those apps show as 'review')")
     return out

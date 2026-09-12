@@ -49,6 +49,7 @@ from __future__ import annotations
 import datetime
 import os
 
+import fmt
 import qlik_core as core
 
 EXTRACTOR_TOKEN = "extractor"        # what marks an app as landing outside data
@@ -113,15 +114,7 @@ def best_state(states):
     return max(known, key=lambda s: _STATE_RANK[s]) if known else STATE_WILDCARD
 
 
-def _days_since(iso):
-    if not iso:
-        return None
-    try:
-        dt = datetime.datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    now = datetime.datetime.now(dt.tzinfo) if dt.tzinfo else datetime.datetime.now()
-    return max(0, (now - dt).days)
+_days_since = fmt.days_since          # one implementation, see fmt.py
 
 
 # --------------------------------------------------------------- criticality
@@ -185,21 +178,23 @@ def score_app(app):
 
 
 # --------------------------------------------------------------- the scan
-def scan_landed_impact(apps, read_script, read_detail, log=None, cancel_check=None):
+def scan_landed_impact(apps, scripts, read_detail, log=None, cancel_check=None):
     """Build the whole picture.
 
     `apps` is core.list_apps() output, each enriched with space_name and
     (best-effort) published/reloaded.
 
-    Two callbacks, not one, and the split matters on a real tenant. Deciding
-    whether an app touches a landed QVD needs only its load script;
-    classifying its fields needs the model, every master item, every visual
-    and a full usage analysis. On a tenant with two thousand apps, most of
-    which read no landed QVD at all, fetching the second for all of them
-    would cost hours for nothing.
+    `scripts` is {guid: script} for every app, as core.fetch_scripts returns
+    it - already fetched, and fetched concurrently, because every app's script
+    is needed and each one is an independent network round trip. A guid
+    mapping to None means the app could not be opened; a guid mapping to ""
+    is an app whose script is empty, which is a different thing.
 
-      read_script(guid) -> str | None
-      read_detail(guid) -> {model_fields, objects, usage_result} | None
+    `read_detail(guid) -> {model_fields, objects, usage_result} | None` stays
+    a callback because it is the expensive half, and is only needed for an app
+    that actually reads a landed QVD. On a tenant with two thousand apps, most
+    of which read none, fetching the model, every master item, every visual
+    and a full usage analysis for all of them would cost hours for nothing.
 
     Returns {"qvds", "fields", "reach", "consumers", "skipped", "extractors"},
     or None if cancelled.
@@ -218,11 +213,10 @@ def scan_landed_impact(apps, read_script, read_detail, log=None, cancel_check=No
     landed = {}                      # qvd basename -> {"producers": [names]}
     extractor_reads = set()
     skipped = []
-    for i, a in enumerate(extractors):
+    for a in extractors:
         if cancel():
             return None
-        log(f"  extractor {i + 1}/{len(extractors)}: {a['name']}")
-        script = read_script(a["guid"])
+        script = scripts.get(a["guid"])
         if script is None:
             skipped.append({"app": a["name"], "guid": a["guid"], "why": "could not be opened"})
             continue
@@ -243,10 +237,10 @@ def scan_landed_impact(apps, read_script, read_detail, log=None, cancel_check=No
     consumers = []
     produces = {}                    # app guid -> qvds it stores (for fan-out)
     reads_by_guid = {}
-    for i, a in enumerate(others):
+    for a in others:
         if cancel():
             return None
-        script = read_script(a["guid"])
+        script = scripts.get(a["guid"])
         if script is None:
             skipped.append({"app": a["name"], "guid": a["guid"], "why": "could not be opened"})
             continue

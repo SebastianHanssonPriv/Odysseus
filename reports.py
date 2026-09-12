@@ -22,6 +22,8 @@ import glob
 import time
 import datetime
 
+import fmt
+
 SUFFIX = ".bbgs.json"      # manifest sits beside the workbook: <stem>.bbgs.json
 SCHEMA = 1
 
@@ -45,18 +47,7 @@ def _plain(value, unit=""):
     return "" if value is None else str(value)
 
 
-def _bytes(n, sign=False):
-    """Byte counts, signed on request. Same 1024-based output as
-    widgets.human_bytes and qlik_capacity.format_bytes, so a delta here reads
-    in the same units as the dashboard it came from. Kept local rather than
-    imported so this module stays free of both the GUI and the Qlik client."""
-    lead = "+" if sign and n > 0 else ""
-    n = float(n or 0)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if abs(n) < 1024 or unit == "TB":
-            return f"{lead}{int(n)} B" if unit == "B" else f"{lead}{n:,.1f} {unit}"
-        n /= 1024
-    return f"{lead}{n:,.1f} TB"
+_bytes = fmt.human_bytes              # one implementation, see fmt.py
 
 
 def record(library, path, product, type_key, title,

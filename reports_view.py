@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 
 import reports
 from widgets import (
-    BAR, LINE, MUTED, make_card, label, head_label, tip, Tag,
+    MUTED, make_card, label, head_label, top_bar, tip, Tag,
     clear_layout,
 )
 
@@ -67,12 +67,7 @@ class ReportsView(QWidget):
         root.addWidget(scroll, 1)
 
     def _build_bar(self):
-        bar = QFrame()
-        bar.setStyleSheet(f"background: {BAR}; border: none; border-bottom: 1px solid {LINE};")
-        lay = QHBoxLayout(bar)
-        lay.setContentsMargins(10, 5, 10, 5)
-        lay.setSpacing(8)
-        lay.addWidget(head_label("Reports", 12))
+        bar, lay = top_bar("Reports")
         lay.addSpacing(8)
         self._filter_group = QButtonGroup(self)
         self._filter_group.setExclusive(True)
