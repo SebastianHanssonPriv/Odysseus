@@ -25,6 +25,22 @@ Get them from Google Fonts (https://fonts.google.com/specimen/Barlow and
 https://fonts.google.com/specimen/Barlow+Condensed) — download the family, take the
 three static `.ttf` files above out of the zip, and ignore the variable-font versions.
 
+**Barlow and Barlow Condensed are two different families, from two different
+downloads.** `Barlow-SemiBold.ttf` is not a substitute for
+`BarlowCondensed-SemiBold.ttf`, and renaming it will not work: the family name
+is recorded inside the file, so a renamed `Barlow-SemiBold.ttf` still registers
+as the family "Barlow SemiBold" and every heading keeps falling back to Segoe UI
+while looking as though the font was installed.
+
+To check what is actually in this folder:
+
+```bat
+python tests\test_fonts.py
+```
+
+It reads the family name out of each `.ttf` and reports which of the two
+families the stylesheets need are missing, and what falls back without them.
+
 ## What happens if they are missing
 
 Nothing breaks. `widgets.load_fonts()` reports which files it could not register,

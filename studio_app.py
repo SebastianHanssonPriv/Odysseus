@@ -539,17 +539,31 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
-    missing_fonts = load_fonts(BASE_DIR)
+    missing_files, missing_families = load_fonts(BASE_DIR)
     app.setStyleSheet(STYLE)
-    app.setFont(QFont("Segoe UI", 10) if missing_fonts else app_font())
+    # The body face is used when the body family loaded, whatever happened to
+    # the heading face. This was `if missing_fonts` over the whole file list,
+    # so one absent heading TTF dropped the entire app to Segoe UI even with
+    # Barlow sitting there working.
+    app.setFont(app_font() if "Barlow" not in missing_families
+                else QFont("Segoe UI", 10))
     if os.path.exists(ICON_PATH):
         app.setWindowIcon(QIcon(ICON_PATH))
     win = MainWindow()
-    win.missing_fonts = list(missing_fonts)
-    if missing_fonts:
-        win.log("Barlow fonts not found (" + ", ".join(missing_fonts) +
-                ") - falling back to Segoe UI. Drop the .ttf files in fonts\\ to "
-                "get the intended type.")
+    win.missing_fonts = list(missing_families)
+    if missing_families:
+        # Name the family, and say what falls back because of it. "Barlow
+        # fonts not found (BarlowCondensed-SemiBold.ttf)" left the reader to
+        # work out that it meant every heading on every screen.
+        what = {"Barlow": "body text", "Barlow Condensed": "headings, section "
+                "labels, buttons, nav items and big numbers"}
+        for fam in missing_families:
+            win.log(f"Font family '{fam}' is not available - {what.get(fam, 'some text')} "
+                    f"fall back to Segoe UI.")
+        if missing_files:
+            win.log("  missing file(s): " + ", ".join(missing_files) +
+                    " - see fonts\\README.md. Note a family name lives inside the "
+                    "file, so renaming another weight will not supply it.")
     win.show()
     sys.exit(app.exec())
 

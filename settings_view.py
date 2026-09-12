@@ -251,13 +251,16 @@ class SettingsView(QWidget):
         self._toggle_mode(self.cmb_p_mode.currentText())
         self.lbl_test.setText("")
         self.lbl_saved.setText("")
+        # missing_fonts holds font FAMILIES the stylesheets need and did not
+        # get, not filenames - a family is what falls back, and naming the file
+        # left the reader to work out what it affected.
         missing = ", ".join(sh.missing_fonts) if sh.missing_fonts else ""
         self.lbl_about.setText(
             f"Bufab BI Governance Studio\n"
             f"Settings file:  {sh.settings_path()}\n"
             f"Library:  {sh.output_dir or '(not set)'}\n"
-            f"Fonts:  " + (f"Barlow not found ({missing}) - falling back to Segoe UI"
-                           if missing else "Barlow loaded"))
+            f"Fonts:  " + (f"{missing} not available - that text falls back to Segoe UI"
+                           if missing else "Barlow and Barlow Condensed loaded"))
         self.bar.set_status("Secrets are not saved - re-enter them each session")
 
     def _toggle_mode(self, mode):

@@ -50,7 +50,16 @@ python tests\test_parser.py
 | `test_case_collision` | Usage matching folds field names to lowercase, so `Region` and `region` share a key and whichever came last decided the answer. The answers are now OR-ed: if any spelling is referenced, the name is. |
 | `test_docs` | CLAUDE.md is the rule sheet future work reads first, so a rule naming a renamed or deleted function sends the reader after something that is not there. Caught a real drift the day it was written. |
 | `test_tenant_walk` | The tenant walk opened one app at a time: 2-3 hours on the real tenant. It is now concurrent per hop, and this compares it against the old sequential implementation run verbatim over the same 12-app, three-hop estate - including the first-writer-wins case where two staging apps produce the same QVD. |
+| `test_fonts` | Reads the family name out of each vendored `.ttf`. A file loading is not evidence that the family the stylesheets need exists - the family name is inside the font, so a renamed weight registers as the wrong family and every heading falls back silently. Exits 2 (**warn**), because a font nobody has vendored is actionable but not a code regression. |
 | `test_shell_cache` | The tenant data-file inventory costs one call per space now, so it is fetched once per session and dropped when the tenant changes. |
+
+## Three outcomes, not two
+
+`ok` and `FAIL` mean what they say. A suite exiting **2** is a `warn`: something
+is actionable but no commit can fix it — a font family nobody has vendored, for
+instance. Warnings print their output on every run and never fail the gate,
+because a gate that stays red for something unfixable is one people learn to
+ignore.
 
 ## Optional dependencies
 

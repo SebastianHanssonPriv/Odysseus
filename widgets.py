@@ -84,16 +84,32 @@ _ABS_SPACING = getattr(QFont, "AbsoluteSpacing",
                        getattr(getattr(QFont, "SpacingType", None), "AbsoluteSpacing", None))
 
 
+# The families the stylesheets above actually ask for. A file loading is not
+# evidence that the family the QSS needs exists: a font's family name lives
+# inside the file, not in its name. Barlow-SemiBold.ttf registers the family
+# "Barlow SemiBold", and renaming it to BarlowCondensed-SemiBold.ttf would not
+# make "Barlow Condensed" appear - which is exactly the mistake this catches.
+_REQUIRED_FAMILIES = ("Barlow", "Barlow Condensed")
+
+
 def load_fonts(base_dir):
-    """Register the vendored Barlow faces. Returns the list of files that could
-    NOT be loaded so the caller can log it once; the QSS font stacks fall back
-    to Segoe UI on their own, so a miss degrades rather than breaks."""
-    missing = []
+    """Register the vendored Barlow faces.
+
+    Returns (missing_files, missing_families). The second is what matters:
+    FONT_BODY wants "Barlow" and FONT_HEAD wants "Barlow Condensed", and each
+    falls back on its own, so a missing heading face must not cost the body
+    face as well.
+    """
+    missing_files, families = [], set()
     for name in _FONT_FILES:
         path = os.path.join(base_dir, "fonts", name)
-        if not os.path.exists(path) or QFontDatabase.addApplicationFont(path) == -1:
-            missing.append(name)
-    return missing
+        fid = QFontDatabase.addApplicationFont(path) if os.path.exists(path) else -1
+        if fid == -1:
+            missing_files.append(name)
+            continue
+        families.update(QFontDatabase.applicationFontFamilies(fid) or [])
+    missing_families = [f for f in _REQUIRED_FAMILIES if f not in families]
+    return missing_files, missing_families
 
 
 def app_font():

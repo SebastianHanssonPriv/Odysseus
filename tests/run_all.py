@@ -48,6 +48,7 @@ COVERS = {
     "test_case_collision": "two fields differing only in case do not cancel out",
     "test_docs": "CLAUDE.md does not describe code that no longer exists",
     "test_tenant_walk": "the concurrent tenant walk gives identical results, faster",
+    "test_fonts": "fonts/ supplies the families the stylesheets ask for",
 }
 
 
@@ -60,7 +61,7 @@ def main(argv):
         return 2
 
     width = max(len(p.stem) for p in suites)
-    failed, skipped, t0 = [], [], time.monotonic()
+    failed, skipped, warned, t0 = [], [], [], time.monotonic()
     for path in suites:
         r = subprocess.run([sys.executable, str(path)], capture_output=True, text=True)
         out = (r.stdout or "") + (r.stderr or "")
@@ -68,21 +69,29 @@ def main(argv):
             mod = out.rsplit("No module named ", 1)[-1].strip().strip("'\"")
             skipped.append(path.stem)
             state = f"skip  (needs {mod})"
+        elif r.returncode == 2:
+            # Exit 2 means "actionable, but no commit can fix it" - a vendored
+            # asset that is absent, say. Visible on every run, never red.
+            warned.append(path.stem)
+            state = "warn"
         elif r.returncode != 0:
             failed.append(path.stem)
             state = "FAIL"
         else:
             state = "ok"
         print(f"  {state:22} {path.stem:{width}}  {COVERS.get(path.stem, '')}")
-        if verbose or path.stem in failed:
+        if verbose or path.stem in failed or path.stem in warned:
             print("".join("      " + l + "\n" for l in out.splitlines()))
 
     took = time.monotonic() - t0
     print()
-    print(f"{len(suites) - len(failed) - len(skipped)} passed, {len(failed)} failed, "
+    passed = len(suites) - len(failed) - len(skipped) - len(warned)
+    print(f"{passed} passed, {len(failed)} failed, {len(warned)} warned, "
           f"{len(skipped)} skipped in {took:.1f}s")
     if failed:
         print("failed: " + ", ".join(failed))
+    if warned:
+        print("warned: " + ", ".join(warned) + "  (actionable, but not a code failure)")
     return 1 if failed else 0
 
 
