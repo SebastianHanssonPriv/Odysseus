@@ -23,7 +23,7 @@ false rather than state nothing.
 
 | Where | What absence meant | What it was read as |
 |---|---|---|
-| `is_extractor` | app not named "extractor" | not an extractor |
+| `extractor_reason` | app not named "extractor" | not an extractor |
 | script parsers | a name in a comment | live code |
 | `_walk_struct` | a property path we did not know | field not used |
 | `score_app` | tenant did not report publish state | not published |

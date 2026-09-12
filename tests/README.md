@@ -48,6 +48,7 @@ python tests\test_parser.py
 | `test_meter` | The billed-capacity gauge ran usage and limit through a byte formatter while the `unit` the tenant reported was captured and never read. Also pins that the check is an exact match, since "gigabytes" contains "byte". |
 | `test_scan_coverage` | A failed Scanner batch drops up to 100 workspaces, and the count went to the log only - so a workbook built on 85% of the tenant looked exactly like one built on all of it. Coverage now leads the Summary sheet. |
 | `test_case_collision` | Usage matching folds field names to lowercase, so `Region` and `region` share a key and whichever came last decided the answer. The answers are now OR-ed: if any spelling is referenced, the name is. |
+| `test_docs` | CLAUDE.md is the rule sheet future work reads first, so a rule naming a renamed or deleted function sends the reader after something that is not there. Caught a real drift the day it was written. |
 | `test_shell_cache` | The tenant data-file inventory costs one call per space now, so it is fetched once per session and dropped when the tenant changes. |
 
 ## Optional dependencies
