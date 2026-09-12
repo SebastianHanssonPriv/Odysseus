@@ -865,8 +865,29 @@ class QlikExporter:
     # --- apply (write) master measures / dimensions ---
     def apply_master(self, app_h, kind, rows, mode, dry_run):
         """Create/update/delete master measures or dimensions from CSV rows.
+
         kind: 'measure' or 'dimension'. mode: 'upsert'/'create'/'update'/'delete'.
-        Matches existing items by name (title). Returns a counts dict."""
+        Matches existing items by EXACT title. Returns
+        {created, updated, deleted, skipped, ambiguous}.
+
+        Three rules, because this is the one feature that writes to a
+        production app and a wrong write is not a wrong number in a
+        spreadsheet:
+
+        A title carried by more than one item is acted on in full. Qlik permits
+        duplicate titles, and acting on one copy while reporting success left
+        the other stale.
+
+        A CSV name that matches nothing exactly but differs from an existing
+        title only in case or padding is AMBIGUOUS: nothing is written, and the
+        log names both spellings. Creating would add the near-duplicate this
+        tool reports elsewhere; updating would rewrite a definition the CSV
+        never named. Neither is a guess worth making on someone's app.
+
+        A name created earlier in the same run is remembered, so the same new
+        name appearing twice in one CSV is created once and then updated,
+        rather than created twice.
+        """
         is_meas = (kind == "measure")
         list_type = "MeasureList" if is_meas else "DimensionList"
         list_key = "qMeasureListDef" if is_meas else "qDimensionListDef"
@@ -879,35 +900,85 @@ class QlikExporter:
         list_def = {"qInfo": {"qType": list_type}, list_key: {"qType": kind}}
         obj_h = self.call(app_h, "CreateSessionObject", [list_def])["qReturn"]["qHandle"]
         items = self.call(obj_h, "GetLayout", [])["qLayout"][layout_key]["qItems"]
-        existing = {it["qMeta"]["title"]: it["qInfo"]["qId"] for it in items}
 
-        counts = {"created": 0, "updated": 0, "deleted": 0, "skipped": 0}
+        # Title -> every id carrying it. Qlik permits two master items with the
+        # same title, and this used to be a dict comprehension keyed on title,
+        # so the second silently overwrote the first: a delete destroyed one
+        # copy and reported "1 deleted" while the other stayed in the app, and
+        # an update changed one definition and left the other stale - in the
+        # tool whose job is making definitions consistent.
+        by_title = {}
+        for it in items:
+            t = (it.get("qMeta") or {}).get("title", "")
+            i = (it.get("qInfo") or {}).get("qId", "")
+            if i:
+                by_title.setdefault(t, []).append(i)
+        # And a second index for near misses, so "net sales " in the CSV is not
+        # quietly created alongside "Net Sales" in the app.
+        by_loose = {}
+        for t in by_title:
+            by_loose.setdefault(t.strip().lower(), []).append(t)
+
+        counts = {"created": 0, "updated": 0, "deleted": 0, "skipped": 0, "ambiguous": 0}
+
+        def near_misses(name):
+            """Existing titles that differ from `name` only in case or padding."""
+            return [t for t in by_loose.get(name.strip().lower(), []) if t != name]
+
         for row in rows:
             name = (row.get("name") or "").strip()
             if not name:
                 continue
+            ids = by_title.get(name) or []
+
+            # No exact match, but something differs only in case or spacing. A
+            # write must not guess which was meant: creating makes the
+            # near-duplicate this tool reports elsewhere, and updating would
+            # rewrite a definition the CSV never named. So it stops and says so,
+            # and the dry run shows it before anything is written.
+            if not ids:
+                close = near_misses(name)
+                if close:
+                    self.log(f"AMBIGUOUS {kind}: CSV says {name!r}, the app has "
+                             f"{', '.join(repr(c) for c in close)} - differs only in case or "
+                             f"spacing. Nothing written. Fix the CSV to match exactly, or "
+                             f"rename the item in the app.")
+                    counts["ambiguous"] += 1
+                    continue
+
             if mode == "delete":
-                if name in existing:
+                if not ids:
+                    counts["skipped"] += 1
+                    continue
+                if len(ids) > 1:
+                    self.log(f"  {len(ids)} {kind}s share the title {name!r} - deleting all.")
+                for i in ids:
                     self.log(f"DELETE {kind}: {name}")
                     if not dry_run:
-                        self.call(app_h, destroy_fn, [existing[name]])
+                        self.call(app_h, destroy_fn, [i])
                     counts["deleted"] += 1
-                else:
-                    counts["skipped"] += 1
                 continue
+
             body, meta = build_measure(row) if is_meas else build_dimension(row)
-            if name in existing:
+            if ids:
                 if mode == "create":
                     counts["skipped"] += 1
                     continue
-                self.log(f"UPDATE {kind}: {name}")
-                if not dry_run:
-                    h = self.call(app_h, get_fn, [existing[name]])["qReturn"]["qHandle"]
-                    prop = self.call(h, "GetProperties", [])["qProp"]
-                    prop.setdefault(prop_key, {}).update(body)
-                    prop.setdefault("qMetaDef", {}).update(meta)
-                    self.call(h, "SetProperties", [prop])
-                counts["updated"] += 1
+                if len(ids) > 1:
+                    self.log(f"  {len(ids)} {kind}s share the title {name!r} - updating all, "
+                             f"which is the point of applying one definition to a name.")
+                for i in ids:
+                    self.log(f"UPDATE {kind}: {name}")
+                    if not dry_run:
+                        h = self.call(app_h, get_fn, [i])["qReturn"]["qHandle"]
+                        prop = self.call(h, "GetProperties", [])["qProp"]
+                        # A shallow merge on purpose: a property the CSV does
+                        # not mention keeps its current value rather than being
+                        # blanked.
+                        prop.setdefault(prop_key, {}).update(body)
+                        prop.setdefault("qMetaDef", {}).update(meta)
+                        self.call(h, "SetProperties", [prop])
+                    counts["updated"] += 1
             else:
                 if mode == "update":
                     counts["skipped"] += 1
@@ -917,6 +988,10 @@ class QlikExporter:
                     prop = {"qInfo": {"qType": kind}, prop_key: body, "qMetaDef": meta}
                     self.call(app_h, create_fn, [prop])
                 counts["created"] += 1
+                # A name created now must not be created twice by a later row
+                # in the same CSV.
+                by_title.setdefault(name, []).append("(created this run)")
+                by_loose.setdefault(name.strip().lower(), []).append(name)
         return counts
 
     def do_save(self, app_h):

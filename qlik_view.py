@@ -1270,8 +1270,10 @@ class QlikView(QWidget):
                         if not rows:
                             continue
                         c = exp.apply_master(app_h, kind, rows, mode, dry)
+                        amb = (f", {c['ambiguous']} AMBIGUOUS (nothing written - see above)"
+                               if c.get("ambiguous") else "")
                         self.log(f"  {title} {kind}s: {c['created']} created, {c['updated']} updated, "
-                                 f"{c['deleted']} deleted, {c['skipped']} skipped.")
+                                 f"{c['deleted']} deleted, {c['skipped']} skipped{amb}.")
                         changed += c["created"] + c["updated"] + c["deleted"]
                     if not dry and changed > 0:
                         exp.do_save(app_h)

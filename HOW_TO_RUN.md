@@ -237,6 +237,41 @@ delegated ownership, since a business-critical extractor tied to one
 person's account lifecycle is a continuity risk independent of what this
 tool can see.
 
+### Apply master items
+
+The only feature that writes to a Qlik app. It creates, updates or deletes
+master measures and dimensions from a CSV, matching an existing item by its
+**exact** title. Run it with **Dry run** first: the log then shows every
+create, update, delete and ambiguity without touching anything. A backup of
+the app's current master items is exported to
+`<library>\Qlik\apply_master_items\` before any write, and the app is only
+saved when something actually changed.
+
+Three matching rules exist because a wrong write is not a wrong number in a
+spreadsheet.
+
+**A title carried by more than one item is acted on in full.** Qlik permits two
+master measures with the same title. This used to index existing items by
+title, so the second overwrote the first in a lookup, and a delete destroyed
+one copy while reporting success — leaving the other in the app — and an update
+changed one definition and left the other stale, in the tool whose job is
+making definitions consistent. Both are now acted on, the count says how many,
+and the log says why it wrote more than once.
+
+**A near miss is refused, not guessed.** If the CSV says `net sales` and the app
+has `Net Sales`, nothing is written and the row is reported as `AMBIGUOUS` with
+both spellings named. Creating would add the near-duplicate this tool reports
+elsewhere; updating would rewrite a definition the CSV never named. Fix the CSV
+to match exactly, or rename the item in the app.
+
+**A name created earlier in the same run is remembered**, so the same new name
+appearing twice in one CSV is created once and then updated rather than created
+twice.
+
+An update is a shallow merge: a property the CSV does not mention keeps its
+current value rather than being blanked.
+
+
 ### Comparison analysis
 
 Two things are reported: the same **name** carrying different calculations
