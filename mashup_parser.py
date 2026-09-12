@@ -49,6 +49,9 @@ import re
 from dataclasses import dataclass, field
 
 PARSER_LIMITATIONS = (
+    "Comments are removed before anything is parsed, so a commented-out "
+    "connector is not reported as a source; the strip respects M strings, so "
+    "a URL like \"https://...\" is not mistaken for a comment. "
     "This is a text-level scan of the M expression, not an evaluator: it "
     "does not resolve custom function calls, parameter-substituted "
     "connection strings, or values computed earlier in the same `let` block "
@@ -155,6 +158,63 @@ class SourceResolution:
     direct_sources: list[DirectSource] = field(default_factory=list)
     reference_chain: list[str] = field(default_factory=list)  # query names hopped through
     note: str | None = None
+
+
+def strip_m_comments(text: str) -> str:
+    """Remove M's `//` line comments and `/* */` block comments.
+
+    Power Query keeps commented-out steps the way every other language does,
+    and without this a decommissioned source is reported as a live one. On a
+    real shape:
+
+        // Old source, replaced Jan 2026:
+        // Source = Sql.Database("old-server", "OldDB"),
+        Source = Sql.Database("new-server", "NewDB"),
+
+    the parser found two Sql.Database calls, returned
+    status="multiple_direct_sources" instead of a clean resolution, and the
+    Sources sheet listed old-server as feeding a table that has not touched it
+    in months.
+
+    The scan has to respect M strings, because a URL is the commonest string
+    in a mashup and "https://..." must not be read as a comment. In M a string
+    is double-quoted and a literal quote inside it is written "" - so a
+    doubled quote keeps us inside the string rather than ending it.
+    """
+    src = text or ""
+    out = []
+    i, n = 0, len(src)
+    while i < n:
+        ch = src[i]
+        if ch == '"':
+            out.append(ch)
+            i += 1
+            while i < n:
+                if src[i] == '"':
+                    if i + 1 < n and src[i + 1] == '"':   # "" - an escaped quote
+                        out.append('""')
+                        i += 2
+                        continue
+                    out.append('"')
+                    i += 1
+                    break
+                out.append(src[i])
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "/":
+            j = src.find("\n", i)
+            if j == -1:
+                break
+            i = j                        # keep the newline: M is line-sensitive
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "*":
+            j = src.find("*/", i + 2)
+            i = n if j == -1 else j + 2
+            out.append(" ")
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def _split_top_level_commas(text: str) -> list[str]:
@@ -380,6 +440,7 @@ def resolve_source(
 ) -> SourceResolution:
     chain = _chain or []
     sibling_queries = sibling_queries or {}
+    expr = strip_m_comments(expr)
 
     dataflow_ref = extract_dataflow_reference(expr)
     if dataflow_ref is not None:
@@ -430,6 +491,10 @@ def split_shared_queries(document: str) -> dict[str, str]:
     M section -- see mashup_parser module docstring for the Common Data
     Model reference this is based on."""
     queries = {}
+    # Comments go before the split, so a commented-out `shared X = ...;` member
+    # does not become a query, and a `//` inside one member's comment cannot
+    # swallow the start of the next.
+    document = strip_m_comments(document)
     for m in _SHARED_QUERY_RE.finditer(document):
         name = m.group(1) or m.group(2)
         queries[name] = m.group(3).strip()
