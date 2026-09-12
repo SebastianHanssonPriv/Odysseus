@@ -591,6 +591,15 @@ at startup.
 ---
 
 ## 7. Good to know
+- **Run the tests after changing anything analytical.**
+  ```bat
+  python tests\run_all.py
+  ```
+  Seventeen suites, no framework and no extra dependency, each one pinning a
+  real defect that was found in this app - what "used in a report" means, which
+  apps count as extractors, when two master items are the same calculation,
+  what the write path does with a duplicate title. `tests\README.md` lists what
+  each one protects. Exit code is 0 or 1, so it works as a commit gate.
 - **Verify before deleting.** Usage, lineage, capacity and orphan results are
   read from scripts and name-matching — treat them as a prioritized worklist.
   The orphan scan is skipped entirely below 90% script coverage rather than
