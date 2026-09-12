@@ -496,6 +496,12 @@ class PowerBIView(QWidget):
             self.shell.run_step(0)
             frames = analytics.compute(data_dir)          # one load, shared with the CSVs
             self.shell.run_step(2, f"{len(frames['report_usage_daily']):,} rows")
+            self.log(f"  days are local calendar days in {frames['reporting_tz']}.")
+            if frames["unattributable_views"]:
+                self.log(f"  {frames['unattributable_views']:,} view event(s) had no user or "
+                         f"timestamp and are in no table.")
+            if frames["coverage_warning"]:
+                self.log("  " + frames["coverage_warning"])
 
             out_dir = data_dir / "analytics"
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -642,6 +648,8 @@ class PowerBIView(QWidget):
                                for r in rud.itertuples(index=False)]
                     views, window = pbi_landed.views_from_records(records)
                     self.log(f"  usage: {len(records):,} row(s) over {window} collected day(s).")
+                    if frames["coverage_warning"]:
+                        self.log("  " + frames["coverage_warning"])
                 except SystemExit as e:
                     # analytics raises SystemExit when there are no events yet.
                     self.log(f"  no collected activity events ({e}) - criticality will be "

@@ -412,6 +412,21 @@ implying more. There is no quarterly or yearly figure until that much history
 exists. With no events collected the scan scores on structure alone and says
 so — a model with no events is **unmeasured, not unused**.
 
+**Two things about the daily tables.** Days are **local calendar days** in
+`Europe/Stockholm`, not UTC days. Activity events are timestamped in UTC, and
+bucketing them by their UTC date pushes the last hour or two of every local
+evening onto the previous day — a view at 00:30 Stockholm time on Tuesday is
+23:30 UTC Monday. Set `BIGOV_TZ` to any IANA zone name to change it; an unknown
+or unavailable zone falls back to UTC and says which it used.
+
+And **a day nobody collected is not a day nobody used**. The accumulated files
+*are* the dataset, so a day the scheduled task missed is simply absent, and it
+shows in a daily table as zero views. Usage analytics now names those days:
+which are missing from the collected range, which were collected but hold no
+events, and how many view events could not be attributed to a user or a time.
+Because retention is about 28 days, a gap older than that cannot be backfilled
+— which is the reason the gap is worth telling you about on the day it appears.
+
 The tier: 3+ reports built on it (+3) or 1–2 (+2); 100+ views in the window
 (+3), some views (+2), no views (−1); 5+ distinct users (+1); 10+ tables (+1).
 High from 5, Medium from 3. The Criticality sheet shows every component per
