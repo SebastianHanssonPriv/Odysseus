@@ -18,6 +18,7 @@ import json
 import threading
 
 import sharepoint
+import qlik_core as core
 
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QIcon, QPixmap, QFont
@@ -79,6 +80,10 @@ class MainWindow(QMainWindow):
         # the session and keyed on each app's reload time (see script_cache).
         # About 1 MB for a whole tenant; dropped when the tenant changes.
         self.script_facts = {}
+        # The tenant's data-file inventory: {basename: modified date}. Filled
+        # once per session by data_file_map() because it now costs one call per
+        # space rather than one call in total, and three features want it.
+        self.data_files = None
         self.apps = []               # the loaded Qlik app list
         self.scope = set()           # selected app GUIDs
         self.pbi = {"tenant_id": "", "client_id": "", "auth_mode": PBI_AUTH_MODES[0],
@@ -444,11 +449,25 @@ class MainWindow(QMainWindow):
     def settings_path(self):
         return SETTINGS_FILE
 
+    def data_file_map(self, log=None):
+        """{basename: modified date} for every data file on the tenant, fetched
+        once per session.
+
+        core.list_data_files walks one connection per space now, so it is no
+        longer something to call inside a single-field trace. Two threads
+        racing here both fetch and the second wins, which costs one redundant
+        walk and is cheaper than a lock for a value that does not change.
+        """
+        if self.data_files is None:
+            self.data_files = core.list_data_files(self.tenant, self.api_key, log)
+        return self.data_files
+
     def apply_settings(self, qlik_tenant, qlik_key, output_dir, library_url, pbi, pbi_secret):
         if qlik_tenant != self.tenant:
             # Facts are keyed by app GUID, which means nothing on a different
             # tenant. Drop them rather than risk a cross-tenant hit.
             self.script_facts.clear()
+            self.data_files = None
         self.tenant = qlik_tenant
         self.api_key = qlik_key
         self.output_dir = output_dir

@@ -238,22 +238,75 @@ def render_app_visibility_text(app_guid, results):
     return "\n".join(lines)
 
 
-def list_data_files(tenant, api_key):
-    """Best-effort: map data-file basename (lowercased) -> last modified date.
-    Depends on tenant/connection access; the caller must handle failures."""
-    host = normalize_host(tenant)
-    url = f"https://{host}/api/v1/data-files?limit=100"
-    out = {}
+def _get_json(host, api_key, url, timeout=30):
+    if not url.startswith("http"):
+        url = f"https://{host}{url}"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _paged(host, api_key, url, timeout=30):
+    """Yield each page of a paginated Qlik REST collection."""
     while url:
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        for it in data.get("data", []):
-            base = os.path.basename(it.get("name") or "").lower()
-            if base:
-                out[base] = it.get("modifiedDate") or it.get("createdDate") or ""
-        nxt = (data.get("links", {}) or {}).get("next") or {}
-        url = nxt.get("href")
+        data = _get_json(host, api_key, url, timeout)
+        yield data
+        url = ((data.get("links", {}) or {}).get("next") or {}).get("href") or ""
+
+
+def data_file_connections(tenant, api_key):
+    """[(connection_id, space_id)] for every DataFiles connection on the tenant.
+
+    There is one such connection per space, plus one for the caller's own
+    personal space, which is the only one /api/v1/data-files will show you
+    unless you name a connection. The personal one has no space, so space_id
+    is "" for it.
+    """
+    host = normalize_host(tenant)
+    out = []
+    for page in _paged(host, api_key, "/api/v1/data-files/connections?limit=100"):
+        for c in page.get("data", []) or []:
+            if c.get("id"):
+                out.append((c["id"], c.get("space") or c.get("spaceId") or ""))
+    return out
+
+
+def list_data_files(tenant, api_key, log=None):
+    """Best-effort: map data-file basename (lowercased) -> last modified date.
+
+    Asking /api/v1/data-files without a connectionId returns ONLY the caller's
+    personal space. Measured on a real tenant: 8 files that way, against 236
+    QVDs in the first 8 of 100 connections. Everything that depends on this
+    map was therefore working off a rounding error of the estate:
+    cross_reference_qvd_inventory could not name a single unreferenced QVD in a
+    shared space, and enrich_lineage_freshness had no modified date for one.
+
+    So the connection list is walked instead, and each connection listed in
+    turn. A connection that refuses is skipped rather than losing the whole
+    map: partial inventory beats none, and the caller cannot tell the
+    difference between a small tenant and a failed call otherwise.
+
+    This is ~1 call per space plus pagination, in place of ~1. It runs once per
+    scan, not once per app, so it is sequential on purpose; parallelise it only
+    if a real tenant shows it mattering.
+    """
+    host = normalize_host(tenant)
+    log = log or (lambda _m: None)
+    out, failed = {}, 0
+    conns = data_file_connections(tenant, api_key)
+    for conn_id, _space in conns:
+        url = (f"/api/v1/data-files?connectionId={urllib.parse.quote(str(conn_id))}"
+               f"&limit=100")
+        try:
+            for page in _paged(host, api_key, url):
+                for it in page.get("data", []) or []:
+                    base = os.path.basename(it.get("name") or "").lower()
+                    if base:
+                        out[base] = it.get("modifiedDate") or it.get("createdDate") or ""
+        except Exception:
+            failed += 1
+    log(f"  {len(out)} data file(s) across {len(conns)} connection(s)"
+        + (f"; {failed} connection(s) could not be listed" if failed else ""))
     return out
 
 

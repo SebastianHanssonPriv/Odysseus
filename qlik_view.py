@@ -1450,7 +1450,8 @@ class QlikView(QWidget):
             self.log(f"  {len(root_apps)} published app(s) found - tracing full lineage "
                      "(this can take a while) ...")
             try:
-                qvd_inventory = {b: m for b, m in core.list_data_files(tenant, key).items()
+                qvd_inventory = {b: m for b, m in
+                                 self.shell.data_file_map(self.log).items()
                                  if b.endswith(".qvd")}
             except Exception as e:
                 qvd_inventory = {}
@@ -1792,7 +1793,9 @@ class QlikView(QWidget):
                     lineage = []
                     self.shell.sig_log.emit(f"  (GetLineage unavailable: {scrub(key, le)})")
                 try:
-                    file_map = core.list_data_files(tenant, key)
+                    # Session-cached: this walks one connection per space, which
+                    # is not something to pay for on every single-field trace.
+                    file_map = self.shell.data_file_map(self.shell.sig_log.emit)
                 except Exception as fe:
                     file_map = {}
                     self.shell.sig_log.emit(f"  (source-file dates unavailable: {scrub(key, fe)})")
