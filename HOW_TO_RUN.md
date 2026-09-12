@@ -237,6 +237,37 @@ delegated ownership, since a business-critical extractor tied to one
 person's account lifecycle is a continuity risk independent of what this
 tool can see.
 
+### Comparison analysis
+
+Two things are reported: the same **name** carrying different calculations
+across apps (a consistency risk), and the same **calculation** carrying
+different names (a consolidation opportunity). Both rest on one judgement —
+when are two definitions the same calculation — so the matching rule is worth
+stating.
+
+Treated as the **same**: whitespace and line breaks anywhere outside a string
+literal, letter case, `//` and `/* */` comments, and optional brackets round a
+plain identifier, since `Sum([Sales])` and `Sum(Sales)` are the same expression
+in Qlik.
+
+Treated as **different**: whitespace inside a string literal, because
+`'United Kingdom'` and `'UnitedKingdom'` are not the same value; a bracketed
+name that contains a space, where the brackets are required rather than
+optional; and single versus double quotes, because in Qlik `"X"` is a field
+reference while `'X'` is a string.
+
+That last group matters. The rule used to strip every space including those
+inside literals, so two measures that genuinely differed by a country name were
+reported as identical — the report hid the very inconsistency it exists to find.
+Brackets and comments went the other way and turned one calculation written
+three ways into a name conflict to chase.
+
+Variables are expanded first where the definition is a plain literal; a
+parameterised `$(f(x))` or an active `$(=…)` reference is left as written and
+flagged in the **Unexpanded vars?** column, because substituting it would be a
+guess.
+
+
 ### Landed QVD impact
 A "landed" QVD is one written by an **extractor**: an app whose load script both
 `STORE`s a QVD and pulls its data from outside Qlik. Those are the apps that

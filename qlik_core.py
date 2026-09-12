@@ -998,9 +998,76 @@ def build_dimension(row):
 # ============================================================
 #  Cross-app consistency analysis (v1)
 # ============================================================
+_PLAIN_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
 def _tight(s):
-    """Whitespace-insensitive, case-folded key for comparing definitions."""
-    return re.sub(r"\s+", "", (s or "")).lower()
+    """Comparison key for a Qlik expression: same calculation, same key.
+
+    This decides what "these two measures are the same" means, so both kinds
+    of error it can make are expensive. Saying two identical measures differ
+    sends a reviewer chasing a conflict that is not there; saying two
+    different ones match hides a real inconsistency, which is the whole point
+    of the report.
+
+    It used to be `re.sub(r"\s+", "", s).lower()`, which made three mistakes:
+
+      Sum([Sales])  vs Sum(Sales)          reported as a conflict; in Qlik the
+                                           brackets are optional round a plain
+                                           identifier and both mean the field
+      Sum(Sales) // net vs Sum(Sales)      reported as a conflict; a trailing
+                                           comment is not a calculation
+      'United Kingdom' vs 'UnitedKingdom'  reported as IDENTICAL, because
+                                           whitespace was stripped inside the
+                                           string literal too
+
+    So the scan is quote-aware. Outside quotes whitespace goes and case folds;
+    inside a literal the text is kept as written apart from case, since that
+    is where a genuine difference hides. Brackets are dropped only round a
+    plain identifier - `[Sales Amount]` keeps them, because there the brackets
+    are required and both authors had to write them.
+
+    Left alone deliberately: single versus double quotes. In Qlik "X" is a
+    field reference and 'X' is a string, so those are different expressions,
+    not two spellings of one.
+    """
+    src = s or ""
+    out = []
+    i, n = 0, len(src)
+    while i < n:
+        ch = src[i]
+        # comments, but only outside a literal
+        if ch == "/" and i + 1 < n and src[i + 1] == "/":
+            j = src.find("\n", i)
+            i = n if j == -1 else j + 1
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "*":
+            j = src.find("*/", i + 2)
+            i = n if j == -1 else j + 2
+            continue
+        if ch in ("'", '"'):
+            j = src.find(ch, i + 1)
+            if j == -1:                      # unterminated: take the rest as-is
+                out.append(src[i:].lower())
+                break
+            out.append(src[i:j + 1].lower())
+            i = j + 1
+            continue
+        if ch == "[":
+            j = src.find("]", i + 1)
+            if j != -1:
+                inner = src[i + 1:j]
+                # optional brackets round a plain identifier, required otherwise
+                out.append(inner.lower() if _PLAIN_IDENT.match(inner)
+                           else src[i:j + 1].lower())
+                i = j + 1
+                continue
+        if ch.isspace():
+            i += 1
+            continue
+        out.append(ch.lower())
+        i += 1
+    return "".join(out)
 
 
 def expand_vars(expr, varmap, max_iter=6):
