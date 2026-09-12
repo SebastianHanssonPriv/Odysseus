@@ -593,6 +593,13 @@ at startup.
 ## 7. Good to know
 - **Verify before deleting.** Usage, lineage, capacity and orphan results are
   read from scripts and name-matching — treat them as a prioritized worklist.
+  The orphan scan is skipped entirely below 90% script coverage rather than
+  shown half-complete, and it now also reports apps whose script builds a QVD
+  name at run time (`LOAD * FROM [$(vPath)$(vTable).qvd]`). Those scripts read
+  fine, so coverage looks complete, but the filename is unknowable and a QVD
+  one of them reads cannot be told from an orphan — the count appears on the
+  Reclaimable orphans tile and in the log, and those apps are worth checking
+  before deleting anything on the list.
 - **Secrets** are never written to disk and are scrubbed from the Qlik log.
 - The headless CLIs still work: `python cli.py collect|raw-export|analytics`
   (Power BI) and `python qlik_export_cli.py` / `python qlik_capacity.py` (Qlik).

@@ -885,7 +885,7 @@ def build_consumption_index(tenant, api_key, apps=None, log=print, max_apps=None
                                    tenant, api_key, apps, log=log,
                                    should_cancel=should_cancel)
     _ck(should_cancel)
-    errors = []
+    errors, runtime_named = [], []
     for a in apps:
         f = facts.get(a["guid"]) or script_cache.UNREADABLE
         if f["source_kind"] == "unread":
@@ -894,8 +894,15 @@ def build_consumption_index(tenant, api_key, apps=None, log=print, max_apps=None
             continue
         produced |= f["stores"]
         consumed |= f["reads"]
+        if f.get("unresolved"):
+            runtime_named.append({"app": a.get("name", ""), "guid": a["guid"],
+                                  "names": sorted(f["unresolved"])})
     return {"consumed": consumed, "produced": produced,
-            "scripts_read": len(apps) - len(errors), "errors": errors}
+            "scripts_read": len(apps) - len(errors), "errors": errors,
+            # Apps whose script reads or writes a QVD named at run time. Their
+            # dependency is real and its filename is unknowable, so the orphan
+            # lists below cannot be complete while any of these exist.
+            "runtime_named": runtime_named}
 
 
 def detect_orphans(import_inv, index, exclude_spaces=("Personal",)):
@@ -904,7 +911,16 @@ def detect_orphans(import_inv, index, exclude_spaces=("Personal",)):
     Files/datasets in excluded spaces (Personal) are SKIPPED - they do not count toward
     capacity. The result carries `coverage` + `low_confidence`: when the load-script
     scan covered only part of the apps, a QVD read solely by an unread app is wrongly
-    flagged orphan, so trust the lists only when low_confidence is False."""
+    flagged orphan, so trust the lists only when low_confidence is False.
+
+    It also carries `runtime_named_readers`: apps whose script reads or writes a
+    QVD whose name is assembled at run time, e.g.
+    `LOAD * FROM [$(vPath)$(vTable).qvd]`. Those scripts read fine, so coverage
+    looks complete, but the filename is unknowable from the text and a QVD one
+    of them reads is indistinguishable from an orphan. Kept apart from
+    low_confidence, which means "the scan did not finish", because on a real
+    estate a few variable-built paths are normal and would otherwise
+    permanently mark every orphan list as untrustworthy."""
     excl = {s.strip().lower() for s in (exclude_spaces or ())}
     consumed = index.get("consumed", set())
     produced = index.get("produced", set())
@@ -953,6 +969,12 @@ def detect_orphans(import_inv, index, exclude_spaces=("Personal",)):
         },
         "index_scripts_read": index.get("scripts_read", 0),
         "index_errors": index.get("errors", []),
+        # Apps that read or write a QVD whose name their script builds at run
+        # time. Their script was read fine, so coverage looks complete, but a
+        # file one of them reads cannot be told apart from an orphan. Reported
+        # separately from low_confidence so that a handful of such apps does
+        # not devalue a flag that means "the scan did not finish".
+        "runtime_named_readers": index.get("runtime_named", []),
         "coverage": (index.get("scripts_read", 0) / index["scripts_total"]
                      if index.get("scripts_total") else 1.0),
         "low_confidence": bool(index.get("scripts_total")
@@ -966,7 +988,8 @@ def detect_orphans(import_inv, index, exclude_spaces=("Personal",)):
 def scan_app_load_profiles(tenant, api_key, apps, log=print, max_apps=None, should_cancel=None,
                            facts_cache=None):
     """Read each app's load script ONCE and return its capacity profile:
-      {guid: {loads_external, source_kind, creates_export, stores:set, reads:set}}
+      {guid: {loads_external, source_kind, creates_export, stores:set, reads:set,
+              unresolved:set}}
     - loads_external -> the app contributes to the APP bucket (external data ingest)
     - creates_export -> the QVDs it STOREs contribute to the datafile bucket
     - stores/reads also feed orphan detection, so this single pass serves both.
@@ -989,7 +1012,12 @@ def scan_app_load_profiles(tenant, api_key, apps, log=print, max_apps=None, shou
             errors += 1
         out[guid] = {"loads_external": f["loads_external"], "source_kind": f["source_kind"],
                      "creates_export": bool(f["stores"]),
-                     "stores": f["stores"], "reads": f["reads"]}
+                     "stores": f["stores"], "reads": f["reads"],
+                     # QVD names this script builds at run time. They cannot be
+                     # matched against a filename, so an app that reads one
+                     # contributes nothing to the consumed set - which would
+                     # make a file it genuinely reads look like an orphan.
+                     "unresolved": f.get("unresolved") or set()}
     if errors:
         log(f"  ({errors} scripts could not be read - those apps show as 'review')")
     return out
@@ -1057,16 +1085,20 @@ def fetch_two_capacities(tenant, api_key, log=print, with_field_detail=True,
     if with_orphans:
         if profiles:
             # reuse the load-script scan already done - no second crawl
-            consumed, produced = set(), set()
-            for p in profiles.values():
+            consumed, produced, runtime_named = set(), set(), []
+            for g, p in profiles.items():
                 produced |= p.get("stores", set())
                 consumed |= p.get("reads", set())
+                if p.get("unresolved"):
+                    runtime_named.append({"app": "", "guid": g,
+                                          "names": sorted(p["unresolved"])})
             total = len([a for a in app_inv["apps"] if a.get("guid")])
             read_ok = sum(1 for p in profiles.values() if p.get("source_kind") != "unread")
             coverage = (read_ok / total) if total else 0.0
             if coverage >= 0.90:
                 index = {"consumed": consumed, "produced": produced,
-                         "scripts_read": read_ok, "scripts_total": total, "errors": []}
+                         "scripts_read": read_ok, "scripts_total": total, "errors": [],
+                         "runtime_named": runtime_named}
                 imp_section["orphans"] = detect_orphans(imp_inv, index, exclude_spaces=exclude_spaces)
             else:
                 log(f"== ORPHAN detection SKIPPED: only {coverage:.0%} of app scripts read "
@@ -1183,6 +1215,13 @@ def print_two_capacity_summary(result, top=10):
         if orph["index_errors"]:
             print(f"   (note: {len(orph['index_errors'])} app scripts could not be read - "
                   "their reads aren't counted, so verify those before deleting)")
+        rn = orph.get("runtime_named_readers") or []
+        if rn:
+            print(f"   (note: {len(rn)} app(s) read or write a QVD whose name their script "
+                  "builds at run time, so a file one of them reads cannot be told from an "
+                  "orphan - check these before deleting anything above)")
+            for r in rn[:5]:
+                print(f"     {r.get('app') or r.get('guid')}: {', '.join(r['names'][:3])}")
 
 
 # ============================================================

@@ -996,7 +996,12 @@ class QlikView(QWidget):
             rc = orph.get("reclaimable", {})
             tot = (rc.get("orphan_file_bytes", 0) + rc.get("produced_only_bytes", 0)
                    + rc.get("orphan_dataset_bytes", 0))
-            specs.append(("Reclaimable orphans", human_bytes(tot), "files + datasets", BAD))
+            rn = len(orph.get("runtime_named_readers") or [])
+            # A caveat on the tile itself, not only in the log: this is the
+            # number someone deletes against.
+            sub = ("files + datasets" if not rn else
+                   f"files + datasets - {rn} app(s) build a QVD name at run time, verify first")
+            specs.append(("Reclaimable orphans", human_bytes(tot), sub, BAD))
         row, _ = kpi_row(specs)
         self.cap_dash.addWidget(row)
 
