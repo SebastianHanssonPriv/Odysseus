@@ -30,27 +30,55 @@ the endpoint accepts one.
    OTHER than the one we started from. Other apps = consumers = the whole idea
    works.
 
-It only ever issues GETs. It writes nothing and changes nothing.
+It only ever issues GETs. It writes nothing to the tenant and changes nothing.
+Locally it writes one file, probe_output.txt, so you have something to paste
+back.
 
-## Running it
+## Running it in VS Code
+
+Open this file and press the Run button (or F5). It has no arguments and no
+dependencies beyond the standard library, so nothing needs installing. It will
+ask for three things:
+
+    Tenant host   bufab.eu.qlikcloud.com
+    API key       pasted; it is not echoed to the screen
+    App GUID      an app you know READS at least one QVD
+
+Pick a consuming app, not an extractor: an extractor writes QVDs and the probe
+needs one that reads them. Any app whose Field lineage report showed QVD
+sources will do.
+
+If the key prompt does not accept a paste, run it from the integrated terminal
+instead (Terminal -> New Terminal):
+
+    python probe_qvd_lineage.py
+
+## The other two ways to run it
+
+Arguments, if you would rather not be prompted:
 
     python probe_qvd_lineage.py <tenant-host> <api-key> <app-guid>
 
-e.g.
+Or environment variables, which is the one to use if you want a launch.json
+entry that does not ask anything:
 
-    python probe_qvd_lineage.py bufab.eu.qlikcloud.com eyJhbGciOi... 1a2b3c4d-...
+    QLIK_HOST, QLIK_API_KEY, QLIK_APP_GUID
 
-Pick an app you know reads at least one QVD - a consuming app, not an
-extractor. Paste the whole output back; the key is short-lived so there is
-nothing to redact, but the script masks it anyway.
+## What to send back
+
+The whole of probe_output.txt, written next to this script. The key is never in
+it - only its first and last few characters - so there is nothing to redact.
 """
 from __future__ import annotations
 
 import json
+import os
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+
+OUTPUT_FILE = "probe_output.txt"
 
 
 def get(host, key, path):
@@ -104,14 +132,76 @@ def app_guids_in(nodes):
     return out
 
 
-def main():
-    if len(sys.argv) != 4:
-        print(__doc__)
-        return 2
-    host, key, app_guid = sys.argv[1].strip().replace("https://", "").strip("/"), \
-        sys.argv[2].strip(), sys.argv[3].strip()
+# ------------------------------------------------------------------ input
+def _ask(label, example, secret=False):
+    """One prompt. `secret` hides the typing where the terminal allows it."""
+    prompt = f"{label} ({example}): " if example else f"{label}: "
+    if secret:
+        try:
+            import getpass
+            return getpass.getpass(prompt).strip()
+        except Exception:
+            # VS Code's Debug Console has no terminal for getpass to hide
+            # behind, so fall back to an echoing prompt rather than failing.
+            print("  (this console cannot hide the key as you paste it)")
+    return input(prompt).strip()
+
+
+def gather():
+    """(host, key, app_guid) from the command line, the environment, or by
+    asking. Returns None if anything is missing, so the caller can stop."""
+    if len(sys.argv) == 4:
+        host, key, guid = sys.argv[1], sys.argv[2], sys.argv[3]
+    else:
+        host = os.environ.get("QLIK_HOST", "")
+        key = os.environ.get("QLIK_API_KEY", "")
+        guid = os.environ.get("QLIK_APP_GUID", "")
+        if not (host and key and guid):
+            print("Qlik QVD-lineage probe.  Read-only: it issues GETs and nothing else.")
+            print("Press Enter at any prompt to stop.")
+            print()
+            host = host or _ask("Tenant host", "bufab.eu.qlikcloud.com")
+            if not host:
+                return None
+            key = key or _ask("API key", "not echoed", secret=True)
+            if not key:
+                return None
+            guid = guid or _ask("App GUID - an app you know READS a QVD", "")
+            if not guid:
+                return None
+            print()
+
+    host = host.strip().replace("https://", "").replace("http://", "").strip("/")
+    return host, key.strip(), guid.strip()
+
+
+class _Tee:
+    """Everything printed goes to the screen and to probe_output.txt, so there
+    is one file to send back instead of a terminal to copy out of."""
+
+    def __init__(self, path):
+        self.stream = sys.stdout
+        self.file = open(path, "w", encoding="utf-8")
+
+    def write(self, s):
+        self.stream.write(s)
+        self.file.write(s)
+
+    def flush(self):
+        self.stream.flush()
+        self.file.flush()
+
+    def close(self):
+        self.file.close()
+
+
+def probe(host, key, app_guid):
     print(f"tenant : {host}")
-    print(f"key    : {key[:12]}...{key[-4:]}  ({len(key)} chars)")
+    # A real Qlik API key is a JWT of several hundred characters, so showing
+    # 16 of them confirms the right key without disclosing it. Anything short
+    # is not a key we recognise, and 16 characters of it might be most of it.
+    shown = f"{key[:12]}...{key[-4:]}" if len(key) > 60 else "(hidden: shorter than a key should be)"
+    print(f"key    : {shown}  ({len(key)} chars)")
     print(f"app    : {app_guid}")
     print()
 
@@ -205,6 +295,27 @@ def main():
         print("         dead and the facts cache stands.")
     print("=" * 68)
     return 0
+
+
+def main():
+    got = gather()
+    if not got:
+        print("Nothing entered, so nothing was called. Run it again when you have "
+              "the host, an API key and an app GUID.")
+        return 2
+
+    out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), OUTPUT_FILE)
+    tee = _Tee(out_path)
+    real_stdout, sys.stdout = sys.stdout, tee
+    try:
+        code = probe(*got)
+        print()
+        print(f"This output is also saved to {out_path}")
+        print("Send that file back - the key is not in it.")
+    finally:
+        sys.stdout = real_stdout
+        tee.close()
+    return code
 
 
 if __name__ == "__main__":

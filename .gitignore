@@ -3,6 +3,10 @@
 *_probe.py
 *_probe_run.py
 
+# The probe's own transcript. It holds no key, but it names internal QVD
+# paths and app GUIDs, so it stays local.
+probe_output.txt
+
 __pycache__/
 *.pyc
 build/
