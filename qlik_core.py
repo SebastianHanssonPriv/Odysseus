@@ -332,25 +332,46 @@ def list_data_files(tenant, api_key, log=None):
     map: partial inventory beats none, and the caller cannot tell the
     difference between a small tenant and a failed call otherwise.
 
-    This is ~1 call per space plus pagination, in place of ~1. It runs once per
-    scan, not once per app, so it is sequential on purpose; parallelise it only
-    if a real tenant shows it mattering.
+    That is ~1 call per space plus pagination, in place of ~1, and the real
+    tenant has 100 connections. The connections are read concurrently for the
+    same reason fetch_scripts is: this is latency-bound I/O, and the result is
+    identical either way. If the tenant is rate-limiting rather than merely
+    slow then concurrency buys nothing, but request_json honours Retry-After,
+    so it cannot make things worse.
+
+    Order is preserved deliberately. Two connections can hold the same
+    basename, and merging in completion order would make the reported date
+    depend on which request happened to finish first. Merging in connection
+    order gives the same answer on every run.
     """
     host = normalize_host(tenant)
     log = log or (lambda _m: None)
-    out, failed = {}, 0
     conns = data_file_connections(tenant, api_key)
-    for conn_id, _space in conns:
-        url = (f"/api/v1/data-files?connectionId={urllib.parse.quote(str(conn_id))}"
+
+    def one(conn):
+        """{basename: date} for a single connection, or None if it refused."""
+        url = (f"/api/v1/data-files?connectionId={urllib.parse.quote(str(conn[0]))}"
                f"&limit=100")
+        found = {}
         try:
             for page in _paged(host, api_key, url):
                 for it in page.get("data", []) or []:
                     base = os.path.basename(it.get("name") or "").lower()
                     if base:
-                        out[base] = it.get("modifiedDate") or it.get("createdDate") or ""
+                        found[base] = it.get("modifiedDate") or it.get("createdDate") or ""
         except Exception:
-            failed += 1
+            return None
+        return found
+
+    out, failed = {}, 0
+    if conns:
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(SCRIPT_WORKERS, len(conns))) as pool:
+            for found in pool.map(one, conns):     # map keeps input order
+                if found is None:
+                    failed += 1
+                else:
+                    out.update(found)
     log(f"  {len(out)} data file(s) across {len(conns)} connection(s)"
         + (f"; {failed} connection(s) could not be listed" if failed else ""))
     return out
@@ -382,7 +403,8 @@ def classify_external_load(script):
     return None, "file-based (review)"
 
 
-SCRIPT_WORKERS = 6          # concurrent engine sessions for a bulk script read
+SCRIPT_WORKERS = 6          # concurrent engine sessions for a bulk script read,
+                            # and concurrent REST reads where the same applies
 
 
 def fetch_scripts(tenant, api_key, guids, workers=SCRIPT_WORKERS, log=None,
