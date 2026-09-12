@@ -203,6 +203,7 @@ def scan_model_lineage(client, scan_timeout_seconds=600, cancel_check=None, log=
     workspace_ids = list(list_workspace_ids(client))
     results = []
     batch_errors = 0
+    missed_ids = []
     tally = {"datasets": 0, "reports": 0, "dataflows": 0, "dashboards": 0}
 
     for workspace in scan_workspaces(client, workspace_ids, scan_timeout_seconds):
@@ -211,7 +212,10 @@ def scan_model_lineage(client, scan_timeout_seconds=600, cancel_check=None, log=
             break
         if "scan_batch_error" in workspace:
             batch_errors += 1
-            log(f"  scan batch error: {workspace['scan_batch_error']}")
+            missed = workspace.get("workspace_ids") or []
+            missed_ids.extend(missed)
+            log(f"  scan batch error ({len(missed)} workspace(s) not scanned): "
+                f"{workspace['scan_batch_error']}")
             continue
         for key in tally:
             tally[key] += len(workspace.get(key) or [])
@@ -233,9 +237,26 @@ def scan_model_lineage(client, scan_timeout_seconds=600, cancel_check=None, log=
         results.extend(_resolve_workspace_datasets(workspace, dataflow_cache, log))
 
     real_tables = [r for r in results if r["status"] != "dataset_has_no_tables"]
+    # Coverage is part of the result, not just a log line. A batch covers up
+    # to _SCAN_BATCH_SIZE workspaces, so one failure can silently remove a
+    # hundred of them - and a workbook built on 85% of the tenant looked
+    # exactly like one built on all of it. Every count on every sheet, and the
+    # whole of Dataflow field impact downstream, rests on how much was scanned.
+    coverage = {
+        "workspaces_requested": len(workspace_ids),
+        "batch_errors": batch_errors,
+        "workspaces_missed": missed_ids,
+        "cancelled": bool(cancel_check and cancel_check()),
+    }
+    if sink is not None:
+        sink["coverage"] = coverage
     log(f"Scanned {len(workspace_ids)} workspace(s) ({batch_errors} batch error(s)), "
         f"resolved {len(real_tables)} table(s) across {len(results) - len(real_tables)} "
         f"dataset(s) with no table detail.")
+    if missed_ids:
+        log(f"  {len(missed_ids)} workspace(s) were NOT scanned because their batch failed. "
+            f"Every count in this report excludes them, so treat anything that reads as "
+            f"'nothing uses this' as unconfirmed until the scan completes cleanly.")
     if not real_tables:
         all_empty = tally["datasets"] == tally["reports"] == tally["dataflows"] == tally["dashboards"] == 0
         log(f"  Diagnostic: across all scanned workspaces the Scanner API returned "
@@ -389,13 +410,21 @@ def _dataset_sibling_expressions(tables):
     return siblings
 
 
-def render_model_lineage_text(results):
+def render_model_lineage_text(results, coverage=None):
     counts: dict[str, int] = {}
     for r in results:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
     all_cols = [cu for r in results for cu in (r.get("column_usage") or [])]
     used_cols = sum(1 for cu in all_cols if cu["used_in_dax"])
     lines = [f"MODEL LINEAGE - {len(results)} table(s) scanned", ""]
+    if coverage and coverage.get("workspaces_missed"):
+        n = len(coverage["workspaces_missed"])
+        lines += [f"INCOMPLETE SCAN: {n} of {coverage.get('workspaces_requested', '?')} "
+                  f"workspace(s) were not scanned ({coverage.get('batch_errors', 0)} batch "
+                  f"error(s)). Everything below excludes them.", ""]
+    if coverage and coverage.get("cancelled"):
+        lines += ["CANCELLED: the scan was stopped early, so this covers only the "
+                  "workspaces reached before then.", ""]
     for status, n in sorted(counts.items(), key=lambda kv: -kv[1]):
         lines.append(f"  {status}: {n}")
     if all_cols:
@@ -463,7 +492,7 @@ def _build_source_usage(results):
     return rows
 
 
-def write_model_lineage_report(results, out_dir, log):
+def write_model_lineage_report(results, out_dir, log, coverage=None):
     """One combined workbook: Summary (status counts) + Model lineage detail
     -- one row per table: workspace, dataset, table, status, dataflow hop
     count, connector(s), source table(s)/view(s) (including any brought in
@@ -478,6 +507,17 @@ def write_model_lineage_report(results, out_dir, log):
     status_counts: dict[str, int] = {}
     for r in results:
         status_counts[r["status"]] = status_counts.get(r["status"], 0) + 1
+    cov_rows = []
+    if coverage:
+        missed = coverage.get("workspaces_missed") or []
+        cov_rows = [["Workspaces requested", coverage.get("workspaces_requested", "")],
+                    ["Workspaces NOT scanned (batch failed)", len(missed)],
+                    ["Scan batch errors", coverage.get("batch_errors", 0)],
+                    ["Scan cancelled early", "Yes" if coverage.get("cancelled") else "No"]]
+        if missed:
+            cov_rows.append(["Reading this report", "Every count below excludes the "
+                             "unscanned workspaces. A row that reads as unused is "
+                             "unconfirmed until a clean scan."])
     detail_rows = [_summarize_row(r) for r in results]
 
     column_headers = ["Workspace", "Dataset", "Table", "Column", "Used in a DAX calculation"]
@@ -527,6 +567,13 @@ def write_model_lineage_report(results, out_dir, log):
     summary_rows.append(("Columns referenced by a DAX calculation",
                          f"{used_cols} / {total_cols}" if total_cols else "0 / 0"))
     summary_rows.append(("Distinct resolved sources", len(source_rows)))
+    if cov_rows:
+        # At the top of the sheet, not the bottom: how much of the tenant this
+        # covers governs how every number under it should be read.
+        summary_rows = [("== SCAN COVERAGE ==", "")] + [tuple(r) for r in cov_rows] \
+            + [("", ""), ("== RESULTS ==", "")] + summary_rows
+    if total_cols and unknown_cols:
+        summary_rows.append(("  of which DAX usage not known", unknown_cols))
     detail_headers = ["Workspace", "Dataset", "Table", "Status", "Dataflow hops",
                       "Connector", "Source table/view", "Fields (where resolved)",
                       "Fields detected via", "Note"]

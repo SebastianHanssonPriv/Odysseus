@@ -21,9 +21,16 @@ own configuration.
 from __future__ import annotations
 
 import time
-from typing import Iterator
+from typing import TYPE_CHECKING, Iterator
 
-from powerbi_client import PowerBIAdminClient
+# Only ever used as a type annotation, and `from __future__ import
+# annotations` above means annotations are strings that are never evaluated.
+# Importing it for real pulled in auth -> azure.identity -> cryptography at
+# module load, which made this module - a paginator and a poller, with no
+# credential handling of its own - unimportable unless the whole Azure SDK
+# imported cleanly, and untestable without credentials installed.
+if TYPE_CHECKING:
+    from powerbi_client import PowerBIAdminClient
 
 _WORKSPACE_PAGE_SIZE = 5000
 _SCAN_BATCH_SIZE = 100

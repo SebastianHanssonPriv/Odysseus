@@ -563,8 +563,10 @@ class PowerBIView(QWidget):
             tokens = PowerBITokenProvider(settings)
             client = PowerBIAdminClient(tokens)
             self.shell.run_step(0)
+            sink = {}
             results = scan_model_lineage(client, cancel_check=self.shell.cancel_requested,
-                                         log=self.shell.sig_log.emit)
+                                         log=self.shell.sig_log.emit, sink=sink)
+            cov = sink.get("coverage")
             if self.shell.cancel_requested():
                 self.log("Model lineage scan cancelled - no report written.")
                 return
@@ -572,9 +574,10 @@ class PowerBIView(QWidget):
                 self.log("No semantic models found.")
                 return
             self.shell.run_step(1, f"{len(results)} tables")
-            text = render_model_lineage_text(results)
+            text = render_model_lineage_text(results, coverage=cov)
             self.sig_lineage_done.emit(text)
-            out_path = write_model_lineage_report(results, data_dir / "model_lineage", self.shell.sig_log.emit)
+            out_path = write_model_lineage_report(results, data_dir / "model_lineage",
+                                                  self.shell.sig_log.emit, coverage=cov)
             self.shell.run_finish()
             self.log(f"Model lineage report -> {Path(out_path).name}")
             datasets = {r.get("dataset_id") for r in results if r.get("dataset_id")}

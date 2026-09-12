@@ -450,6 +450,18 @@ could not run, and those columns read `not known` rather than `No`. The log
 says which datasets those were while the scan runs.
 
 
+### Model lineage
+
+**Scan coverage leads the Summary sheet.** The Scanner API is called in batches
+of 100 workspaces, and a batch that fails or times out takes all 100 with it.
+That count used to reach the log and nowhere else, so a workbook built on 85%
+of the tenant looked exactly like one built on all of it — including the
+Sources sheet's "used by N tables" counts, and everything Dataflow field impact
+derives from the same scan. The Summary now opens with workspaces requested,
+workspaces not scanned, batch errors and whether the scan was cancelled early,
+followed by a line saying that a row reading as unused is unconfirmed until a
+clean scan.
+
 ### Dataflow field impact
 The Power BI counterpart of **Landed QVD impact**. A Gen1 dataflow entity is
 Power BI's answer to a QVD — a table staged by a separate artifact and then

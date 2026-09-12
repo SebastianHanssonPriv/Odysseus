@@ -10,7 +10,16 @@ not dataflows.
 
 from __future__ import annotations
 
-from powerbi_client import PowerBIAdminClient
+from typing import TYPE_CHECKING
+
+# Only ever used as a type annotation, and `from __future__ import
+# annotations` above means annotations are strings that are never evaluated.
+# Importing it for real pulled in auth -> azure.identity -> cryptography at
+# module load, which made this module - a paginator and a poller, with no
+# credential handling of its own - unimportable unless the whole Azure SDK
+# imported cleanly, and untestable without credentials installed.
+if TYPE_CHECKING:
+    from powerbi_client import PowerBIAdminClient
 
 
 def export_dataflow(client: PowerBIAdminClient, dataflow_id: str) -> dict:
