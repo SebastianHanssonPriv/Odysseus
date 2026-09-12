@@ -2944,7 +2944,14 @@ def attach_report_usage(qvd_rows, usage_result):
     just whether it is present in the model), or None when the field was not
     found in that scan at all (should not normally happen for a status in
     QVD_CONFIRMED_STATUSES, since analyze_usage covers every model field)."""
-    used_by_name = {f["name"].lower(): f["used"] for f in usage_result["fields"]["all"]}
+    # Folded to lowercase for matching, so two model fields differing only in
+    # case collide. OR the answers rather than letting whichever came last win:
+    # if any spelling is referenced, the name is referenced. Getting this the
+    # other way round would put a live field on a list of things to drop.
+    used_by_name = {}
+    for f in usage_result["fields"]["all"]:
+        k = f["name"].lower()
+        used_by_name[k] = bool(used_by_name.get(k)) or bool(f["used"])
     for r in qvd_rows:
         r["used_in_report"] = used_by_name.get(r["final_field"].lower())
     return qvd_rows

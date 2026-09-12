@@ -45,6 +45,7 @@ COVERS = {
     "test_shell_cache": "the tenant inventory is fetched once per session",
     "test_meter": "the billed meter is shown in the unit the tenant reported",
     "test_scan_coverage": "a partly-scanned tenant does not read as a whole one",
+    "test_case_collision": "two fields differing only in case do not cancel out",
 }
 
 
