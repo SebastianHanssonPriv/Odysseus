@@ -22,6 +22,27 @@ if not exist "studio_app.py" (
     exit /b 1
 )
 
+REM The three Barlow faces are vendored, not downloaded at build time, and the
+REM app falls back to Segoe UI without them - silently, in a built .exe, on
+REM somebody else's PC. Better to say so here, which is the only moment it can
+REM still be fixed. Not fatal: a build without them is a legitimate choice.
+set FONTS_OK=1
+for %%F in (Barlow-Regular.ttf Barlow-Medium.ttf BarlowCondensed-SemiBold.ttf) do (
+    if not exist "fonts\%%F" (
+        echo WARNING: fonts\%%F is missing.
+        set FONTS_OK=0
+    )
+)
+if "%FONTS_OK%"=="0" (
+    echo.
+    echo   The .exe will build and run, but every screen falls back to Segoe UI.
+    echo   See fonts\README.md for the three files and where to get them.
+    echo   Note they are NOT in git - check "git status" after adding them.
+    echo.
+) else (
+    echo All three Barlow faces found.
+)
+
 echo Installing dependencies (first run takes a few minutes)...
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt

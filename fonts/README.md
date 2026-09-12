@@ -4,8 +4,16 @@ The redesign uses **Barlow** for body text and **Barlow Condensed SemiBold** for
 headings, section labels, buttons, nav items and big numbers (REDESIGN_SPEC.md §2).
 
 Both are SIL Open Font License, so they can be vendored into this repo and shipped
-inside the `.exe`. They are not committed yet — download them and drop these three
-files into this folder:
+inside the `.exe`.
+
+**They are not in git.** Nothing ignores them — they have simply never been
+committed on any branch, so a fresh clone has this README and nothing else, and
+`build.bat` then bundles an empty `fonts\` folder into an `.exe` that falls back
+to Segoe UI on every screen. Having them locally is not the same as having them
+in the repository: after dropping them in, run `git status`, then add and commit
+them, or every colleague who clones this gets the fallback.
+
+Download them and drop these three files into this folder:
 
 ```
 fonts/Barlow-Regular.ttf
