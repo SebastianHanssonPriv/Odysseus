@@ -35,7 +35,6 @@ import os
 import re
 import csv
 import json
-import time
 import datetime
 
 import fmt
@@ -43,7 +42,7 @@ import urllib.request
 import urllib.error
 
 import script_cache
-from qlik_core import (normalize_host, list_apps, list_spaces,
+from qlik_core import (normalize_host, list_apps, list_spaces, request_json,
                        classify_external_load)
 
 # Moved to qlik_core, next to the other load-script parsers, so the script
@@ -74,30 +73,9 @@ def _ck(should_cancel):
 
 
 # ------------------------------------------------------------------ REST helper
-def _request_json(url, api_key, timeout=30, retries=3):
-    """GET a URL with Bearer auth. Retries briefly on 429/503 (rate limits), so a
-    big sweep degrades gracefully instead of filling up with throttle errors."""
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
-    for attempt in range(retries + 1):
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            if e.code in (429, 503) and attempt < retries:
-                ra = e.headers.get("Retry-After") if e.headers else None
-                try:
-                    wait = float(ra) if ra else 1.5 * (attempt + 1)
-                except (TypeError, ValueError):
-                    wait = 1.5 * (attempt + 1)
-                time.sleep(min(wait, 10))
-                continue
-            raise
-        except urllib.error.URLError:
-            # transient network / DNS (getaddrinfo failed, reset, timeout) - retry
-            if attempt < retries:
-                time.sleep(1.5 * (attempt + 1))
-                continue
-            raise
+# One implementation, in qlik_core, because everything that walks the tenant
+# needs it and qlik_core cannot import this module (see classify_external_load).
+_request_json = request_json
 
 
 def _get_json(tenant, api_key, path, timeout=30):

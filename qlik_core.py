@@ -9,6 +9,7 @@ import csv
 import os
 import re
 import datetime
+import time
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -238,12 +239,42 @@ def render_app_visibility_text(app_guid, results):
     return "\n".join(lines)
 
 
+def request_json(url, api_key, timeout=30, retries=3):
+    """GET a URL with Bearer auth. Retries briefly on 429/503, so a big sweep
+    degrades gracefully instead of filling up with throttle errors.
+
+    Qlik throttles harder than it looks: a probe that fired ~21 lineage calls
+    back to back was answered with 429 on the 21st. Anything that walks the
+    tenant has to come through here, which is why this lives in qlik_core and
+    qlik_capacity aliases it rather than keeping its own copy.
+    """
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 503) and attempt < retries:
+                ra = e.headers.get("Retry-After") if e.headers else None
+                try:
+                    wait = float(ra) if ra else 1.5 * (attempt + 1)
+                except (TypeError, ValueError):
+                    wait = 1.5 * (attempt + 1)
+                time.sleep(min(wait, 10))
+                continue
+            raise
+        except urllib.error.URLError:
+            # transient network / DNS (getaddrinfo failed, reset, timeout)
+            if attempt < retries:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            raise
+
+
 def _get_json(host, api_key, url, timeout=30):
     if not url.startswith("http"):
         url = f"https://{host}{url}"
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    return request_json(url, api_key, timeout)
 
 
 def _paged(host, api_key, url, timeout=30):
@@ -1710,9 +1741,10 @@ def fetch_native_lineage(tenant, api_key, app_guid, level="all", up=-1, collapse
     enc = urllib.parse.quote(qri, safe="")
     url = (f"https://{host}/api/v1/lineage-graphs/nodes/{enc}"
            f"?level={level}&up={up}&collapse={'true' if collapse else 'false'}")
-    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + api_key})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    # Rate-limit aware: the tenant-usage scan calls this once per published
+    # app, and a 429 partway through used to surface as "lineage unavailable"
+    # for every app after it.
+    data = request_json(url, api_key, timeout=60)
 
     graphs = []
     if isinstance(data.get("graph"), dict):
