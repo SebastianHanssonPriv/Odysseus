@@ -6,6 +6,8 @@ imports - shared by the Qt app and the headless CLI.
 """
 import json
 import csv
+import gzip
+import io
 import os
 import re
 import datetime
@@ -248,11 +250,24 @@ def request_json(url, api_key, timeout=30, retries=3):
     tenant has to come through here, which is why this lives in qlik_core and
     qlik_capacity aliases it rather than keeping its own copy.
     """
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
+    # Ask for gzip. urllib sends no Accept-Encoding of its own, so every REST
+    # response this app has ever fetched came down uncompressed. Measured on a
+    # lineage graph: 43 KB of JSON arrived in 6 KB when asked for, an 86%
+    # saving, and lineage graphs are the largest thing we fetch.
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}",
+                                               "Accept-Encoding": "gzip"})
     for attempt in range(retries + 1):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+                raw = resp.read()
+                if "gzip" in (resp.headers.get("Content-Encoding") or "").lower():
+                    try:
+                        raw = gzip.GzipFile(fileobj=io.BytesIO(raw)).read()
+                    except OSError:
+                        # A corporate proxy that decompresses the body but
+                        # leaves the header on. Trust the bytes, not the label.
+                        pass
+                return json.loads(raw.decode("utf-8"))
         except urllib.error.HTTPError as e:
             if e.code in (429, 503) and attempt < retries:
                 ra = e.headers.get("Retry-After") if e.headers else None
@@ -1732,10 +1747,25 @@ def attach_upstream(trace, producer_map):
 # ============================================================
 #  Qlik native lineage (lineage-graphs REST) -> consumer provenance
 # ============================================================
-def fetch_native_lineage(tenant, api_key, app_guid, level="all", up=-1, collapse=True):
+def fetch_native_lineage(tenant, api_key, app_guid, level="all", up=-1, collapse=False):
     """Call Qlik's lineage-graphs API for an app and return parsed
     {nodes: {qri: meta}, edges: [{source,target,relation}]}.
-    Raises on HTTP error so the caller can fall back."""
+    Raises on HTTP error so the caller can fall back.
+
+    collapse defaults to False because True silently drops QVD nodes. Measured
+    on one real app: collapse=true returned 116 QVD nodes, collapse=false 150,
+    and of 16 QVDs whose producer could be found at all, the collapsed graph
+    missed 5 - not because the chain broke but because the QVD node was not
+    there. Every caller of this function is looking for completeness
+    (native_producer_apps, native_provenance, trace_upstream_apps), so a
+    collapsed graph was costing correctness to save bytes.
+
+    The bytes are cheaper than they look now that request_json asks for gzip:
+    the uncollapsed graph is 5,170 KB of JSON against the collapsed 1,411 KB,
+    but at the 86% compression measured on a smaller graph that is roughly 720
+    KB on the wire against 1,411 KB uncompressed today. Estimated, not
+    measured at this size.
+    """
     host = normalize_host(tenant)
     qri = "qri:app:sense://" + app_guid
     enc = urllib.parse.quote(qri, safe="")
@@ -1744,7 +1774,8 @@ def fetch_native_lineage(tenant, api_key, app_guid, level="all", up=-1, collapse
     # Rate-limit aware: the tenant-usage scan calls this once per published
     # app, and a 429 partway through used to surface as "lineage unavailable"
     # for every app after it.
-    data = request_json(url, api_key, timeout=60)
+    # 120s, not 60: the uncollapsed graph is several megabytes of JSON.
+    data = request_json(url, api_key, timeout=120)
 
     graphs = []
     if isinstance(data.get("graph"), dict):
