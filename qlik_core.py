@@ -1517,11 +1517,80 @@ def _parse_dt(s):
         return None
 
 
-def extract_file_refs(text):
+def resolve_script_vars(script, passes=3):
+    """Substitute $(vName) where the script SETs vName to a plain literal.
+
+    Qlik scripts almost always build QVD paths from a variable:
+
+        SET vQVD = 'lib://QVD_Prod';
+        STORE Orders INTO [$(vQVD)/Orders.qvd](qvd);
+
+    Left unresolved, that path yields the basename "$(vqvd)orders.qvd" when the
+    variable is joined without a separator, which matches nothing and silently
+    breaks the link between the app that writes a QVD and the apps that read
+    it. Substituting first is what keeps producer and consumer talking about
+    the same file.
+
+    Only literal assignments are substituted. A LET whose value contains "("
+    is an expression (LET vDate = Date(Today())) and expanding it as text would
+    invent a filename, so it is left alone - a name we cannot resolve must stay
+    visibly unresolved rather than become a plausible wrong one. Runs a few
+    passes so a variable defined in terms of another resolves too.
+    """
+    if not script or "$(" not in script:
+        return script or ""
+    pairs = {}
+    for m in re.finditer(r"""(?im)^\s*(?:SET|LET)\s+([A-Za-z_][\w.]*)\s*=\s*(.*?);\s*$""",
+                         script):
+        name, val = m.group(1), m.group(2).strip()
+        val = val.strip("'\"")
+        # A value may itself reference other variables - SET vQVD =
+        # '$(vRoot)/QVD/' is ordinary - so those are set aside before deciding
+        # whether what is left is a literal. Any other parenthesis means a
+        # function call, and expanding that as text would invent a filename.
+        if "(" in re.sub(r"\$\([A-Za-z_][\w.]*\)", "", val):
+            continue
+        pairs[name.lower()] = val
+    if not pairs:
+        return script
+    out = script
+    for _ in range(passes):
+        before = out
+
+        def sub(m):
+            return pairs.get(m.group(1).lower(), m.group(0))
+
+        out = re.sub(r"\$\(([A-Za-z_][\w.]*)\)", sub, out)
+        if out == before:
+            break
+    return out
+
+
+# A name that still holds a $(...) after resolve_script_vars is built at
+# runtime and cannot be known from the text. It is reported as unresolved
+# rather than added to the file set, where it would look like a real QVD that
+# nothing reads.
+_UNRESOLVED = re.compile(r"\$\(")
+
+
+def extract_file_refs(text, with_unresolved=False):
+    """Basenames of the data files a script mentions.
+
+    Comments are stripped first. A Qlik script that has been maintained for a
+    few years is full of commented-out STORE and LOAD lines, and counting those
+    invents QVDs that no longer exist and dependencies that are not there.
+    """
     if not text:
-        return set()
-    found = re.findall(r"([^\s\\/\[\]'\"]+\.(?:qvd|csv|txt|xlsx|xls|parquet))", text, re.I)
-    return {os.path.basename(f).lower() for f in found}
+        return (set(), set()) if with_unresolved else set()
+    clean = resolve_script_vars(_strip_script_comments(text))
+    found = re.findall(r"([^\s\\/\[\]'\"]+\.(?:qvd|csv|txt|xlsx|xls|parquet))", clean, re.I)
+    names, unresolved = set(), set()
+    for f in found:
+        base = os.path.basename(f).lower()
+        if not base:
+            continue
+        (unresolved if _UNRESOLVED.search(base) else names).add(base)
+    return (names, unresolved) if with_unresolved else names
 
 
 def enrich_lineage_freshness(trace, app_last_reload, file_map):
@@ -1709,18 +1778,46 @@ def write_field_lineage_html(trace, app_title, app_guid, out_dir):
 # ============================================================
 #  Cross-app lineage (which app STOREs which QVD -> walk upstream)
 # ============================================================
-def parse_store_reads(script):
+def parse_store_reads(script, with_unresolved=False):
     """From a load script, return (stores, reads): basenames of QVDs the app
-    writes (STORE ... INTO ...qvd) and QVDs it reads (everything else)."""
+    writes (STORE ... INTO ...qvd) and QVDs it reads (everything else).
+
+    Comments are stripped and $(vVar) paths resolved first - see
+    extract_file_refs and resolve_script_vars for why both matter more than
+    they sound.
+
+    The INTO path is matched as a bracketed path or a bare token rather than
+    as "anything without parentheses". The old expression excluded "(" so that
+    it would stop before the (qvd) suffix, which meant the single most common
+    form of all,
+
+        STORE Orders INTO [$(vQVD)/Orders.qvd](qvd);
+
+    did not match at all: the app was recorded as storing nothing, and
+    Orders.qvd then fell through to the read set, so an extractor looked like
+    a consumer of its own output.
+    """
     if not script:
-        return set(), set()
-    stores = set()
-    for m in re.finditer(r"\bSTORE\b[^;]*?\bINTO\b\s*([^;()]+\.qvd)", script, re.I | re.S):
-        base = os.path.basename(m.group(1).strip()).strip("[]' ").replace('"', "").lower()
-        if base:
-            stores.add(base)
-    all_qvd = {b for b in extract_file_refs(script) if b.endswith(".qvd")}
-    return stores, (all_qvd - stores)
+        return ((set(), set(), set()) if with_unresolved else (set(), set()))
+    clean = resolve_script_vars(_strip_script_comments(script))
+    stores, unresolved = set(), set()
+    for m in re.finditer(r"(?is)\bSTORE\b[^;]*?\bINTO\b\s*(\[[^\]]*\]|[^\s;]+)", clean):
+        path = m.group(1).strip()
+        if path.startswith("["):
+            path = path[1:-1] if path.endswith("]") else path[1:]
+        else:
+            path = re.sub(r"(?i)\((?:qvd|txt|csv|parquet)\)\s*$", "", path)
+        base = os.path.basename(path.strip()).strip("[]' ").replace('"', "").lower()
+        if not base.endswith(".qvd"):
+            continue
+        (unresolved if _UNRESOLVED.search(base) else stores).add(base)
+
+    all_qvd, unres_refs = extract_file_refs(script, with_unresolved=True)
+    all_qvd = {b for b in all_qvd if b.endswith(".qvd")}
+    reads = all_qvd - stores
+    if with_unresolved:
+        return stores, reads, unresolved | {u for u in unres_refs if u.endswith(".qvd")}
+    return stores, reads
 
 
 def build_producer_map(index):

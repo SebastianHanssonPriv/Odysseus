@@ -268,6 +268,15 @@ def scan_landed_impact(apps, facts, read_consumer, log=None, cancel_check=None):
         extractor_reads |= f["reads"]
         for q in f["stores"]:
             landed.setdefault(q, {"producers": []})["producers"].append(a["name"])
+        # A QVD whose name the script builds at run time is a real dependency
+        # with an unknowable name. Reported, not guessed: the alternative is a
+        # row for "$(vtable).qvd" that nothing reads, which reads as a cleanup
+        # candidate when it is nothing of the kind.
+        for q in f.get("unresolved", ()):
+            skipped.append({"app": a["name"], "guid": a["guid"],
+                            "why": f"stores a QVD named at run time ({q}) - the file is "
+                                   "real but its name cannot be read from the script, so "
+                                   "its fields are not in this report"})
     log(f"{len(landed)} landed QVD(s) written by the extractor apps.")
     if not landed:
         return {"qvds": landed, "fields": [], "reach": [], "consumers": [],

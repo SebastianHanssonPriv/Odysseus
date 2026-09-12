@@ -40,24 +40,33 @@ import qlik_core as core
 
 # Bump this after changing parse_store_reads, extract_file_refs or
 # classify_external_load, so every cached entry is recomputed.
-FACTS_VERSION = 1
+FACTS_VERSION = 2       # 2: comments stripped and $(vVar) paths resolved
 
 
 def facts_from_script(script):
     """The small fact set the tenant-wide scans need out of one load script."""
-    stores, _reads = core.parse_store_reads(script)
-    reads = core.extract_file_refs(script) - stores
+    stores, reads, unresolved = core.parse_store_reads(script, with_unresolved=True)
+    # reads is every FILE it reads (not only QVDs), minus what it writes, so a
+    # CSV or Excel source still counts as an external source downstream.
+    files, _u = core.extract_file_refs(script, with_unresolved=True)
+    reads = files - stores
     loads_external, source_kind = core.classify_external_load(script)
     return {
         "stores": stores,                  # QVD basenames this app writes
         "reads": reads,                    # every file it reads, minus what it writes
         "loads_external": loads_external,  # True / False / None (undetermined)
         "source_kind": source_kind,
+        # QVD names the script builds at run time, e.g. STORE ... INTO
+        # [lib://QVD/$(vTable).qvd]. Kept apart from stores and reads on
+        # purpose: the dependency is real but its name is unknowable from the
+        # text, and inventing "$(vtable).qvd" as a filename would put a QVD in
+        # the report that nothing reads because it does not exist.
+        "unresolved": unresolved,
     }
 
 
 UNREADABLE = {"stores": set(), "reads": set(), "loads_external": None,
-              "source_kind": "unread"}
+              "source_kind": "unread", "unresolved": set()}
 
 
 def _key(app):
@@ -125,4 +134,5 @@ def stats(cache):
         size += 200                                  # dict + small values
         size += sum(len(s) + 50 for s in f["stores"])
         size += sum(len(s) + 50 for s in f["reads"])
+        size += sum(len(s) + 50 for s in f.get("unresolved", ()))
     return n, size
