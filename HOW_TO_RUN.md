@@ -409,6 +409,35 @@ There is no automatic collection yet. Two ways to keep the daily history flowing
    history. This feeds a Power BI semantic model for usage reporting until the
    move to Fabric in winter-26 / spring-27.
 
+### Why a second tenant-wide scan is fast
+Three Qlik tasks need every app's load script: the capacity report (twice over,
+once for the external-load profile and once for orphan detection), Tenant QVD
+usage, and Landed QVD impact. Reading one is a separate engine session, so doing
+them one at a time on a couple of thousand apps is minutes of pure network wait.
+
+Two things fix that, and neither needs any setup:
+
+- **The scripts are read concurrently**, six sessions at a time. The limit is
+  the tenant's own concurrent-session and rate limits rather than your PC, which
+  is why it is six and not sixty; `SCRIPT_WORKERS` in `qlik_core.py` if that
+  ever needs tuning.
+- **What each script says is remembered for the session** — which QVDs it writes
+  and reads, and whether it loads external data. Each entry is keyed on the
+  app's last reload time, so an app that has reloaded since is re-read and one
+  that has not is not. Within a single capacity run that halves the work
+  outright; run the capacity report and then Landed QVD impact and the second
+  one re-reads only what changed.
+
+The cache holds the parsed facts, not the scripts: roughly 1 MB for a whole
+tenant rather than tens of MB, and it contains QVD names rather than the
+`LIB CONNECT TO` lines a script carries. It lives in memory only, disappears
+when you close Studio, and is dropped if you point Studio at a different
+tenant. Nothing is written to disk, so there is nothing to clear or govern.
+
+It buys nothing for a single scheduled scan once a day — anything that reloads
+nightly will be re-read anyway. It buys a lot for running two scans in a row,
+or re-running one after a failure.
+
 ## 5. Home
 Opens on a cross-product overview: Qlik billed-capacity % + reclaim, and Power BI
 views/users — populated from the latest scan in each workspace.

@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 import qlik_core as core
 import qlik_capacity as qcap
 import qlik_landed as landed
+import script_cache
 import reports
 from scope_sheet import ScopeBar
 from widgets import (
@@ -894,7 +895,8 @@ class QlikView(QWidget):
             self.shell.run_step(0)
             res = qcap.fetch_two_capacities(tenant, key, log=self.shell.sig_log.emit,
                                             with_orphans=with_orphans,
-                                            should_cancel=self.shell.cancel_requested)
+                                            should_cancel=self.shell.cancel_requested,
+                                            facts_cache=self.shell.script_facts)
             self.sig_capacity_result.emit(res)
             red = (res.get("app_reload") or {}).get("redundancy", {})
             cons = res.get("consumption") or {}
@@ -1529,11 +1531,11 @@ class QlikView(QWidget):
             self.log(f"  {len(apps)} app(s) on the tenant.")
             self.shell.run_step(1, f"{len(apps)} apps")
 
-            # The cheap half for every app, fetched concurrently: one engine
-            # session per app is almost all network wait, so reading them one
-            # at a time is minutes of pure latency on a tenant this size.
-            scripts = core.fetch_scripts(
-                tenant, key, [a["guid"] for a in apps],
+            # The cheap half for every app: which QVDs it writes and reads,
+            # parsed once and cached on the shell for the session, so a second
+            # tenant-wide scan re-reads only what has reloaded since.
+            facts = script_cache.get_facts(
+                self.shell.script_facts, tenant, key, apps,
                 log=self.shell.sig_log.emit,
                 should_cancel=self.shell.cancel_requested,
                 on_progress=lambda d, t: self.shell.run_progress(d, t, "apps read"))
@@ -1541,25 +1543,23 @@ class QlikView(QWidget):
                 self.log("Landed impact scan cancelled - no report written.")
                 return
 
-            def _open(guid, _t=tenant, _k=key, _o=out_dir):
-                exp = core.QlikExporter(_t, _k, guid, _o, self.shell.sig_log.emit)
-                exp.connect()
-                h = exp.call(-1, "OpenDoc", [guid])["qReturn"]["qHandle"]
-                return exp, h
-
-            def read_detail(guid, _k=key):
+            def read_consumer(guid, _t=tenant, _k=key, _o=out_dir):
                 """The expensive half, fetched only for an app that actually
-                reads a landed QVD: the model, every master item, every visual
-                and a full usage analysis."""
+                reads a landed QVD: its script for a field-level parse, plus
+                the model, every master item, every visual and a full usage
+                analysis."""
                 exp = None
                 try:
-                    exp, h = _open(guid)
+                    exp = core.QlikExporter(_t, _k, guid, _o, self.shell.sig_log.emit)
+                    exp.connect()
+                    h = exp.call(-1, "OpenDoc", [guid])["qReturn"]["qHandle"]
                     model_fields = exp.fetch_model_fields(h)
                     measures = exp.fetch_measures(h)
                     dims = exp.fetch_dimensions(h)
                     variables = exp.fetch_variables(h)
                     objects = exp.fetch_objects(h)
                     return {
+                        "script": exp.fetch_script(h),
                         "model_fields": model_fields,
                         "objects": objects,
                         "usage_result": core.analyze_usage(measures, dims, variables,
@@ -1572,7 +1572,7 @@ class QlikView(QWidget):
                     if exp is not None:
                         exp.close()
 
-            res = landed.scan_landed_impact(apps, scripts, read_detail,
+            res = landed.scan_landed_impact(apps, facts, read_consumer,
                                             log=self.shell.sig_log.emit,
                                             cancel_check=self.shell.cancel_requested)
             if res is None:

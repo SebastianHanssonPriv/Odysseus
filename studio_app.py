@@ -75,6 +75,10 @@ class MainWindow(QMainWindow):
         self.library_url = ""        # the SharePoint address that folder syncs
         # Scope is global and persistent (REDESIGN_SPEC.md, structural change
         # 2): one selection every Qlik task reads, edited only by ScopeSheet.
+        # Parsed load-script facts, shared by every tenant-wide Qlik scan for
+        # the session and keyed on each app's reload time (see script_cache).
+        # About 1 MB for a whole tenant; dropped when the tenant changes.
+        self.script_facts = {}
         self.apps = []               # the loaded Qlik app list
         self.scope = set()           # selected app GUIDs
         self.pbi = {"tenant_id": "", "client_id": "", "auth_mode": PBI_AUTH_MODES[0],
@@ -441,6 +445,10 @@ class MainWindow(QMainWindow):
         return SETTINGS_FILE
 
     def apply_settings(self, qlik_tenant, qlik_key, output_dir, library_url, pbi, pbi_secret):
+        if qlik_tenant != self.tenant:
+            # Facts are keyed by app GUID, which means nothing on a different
+            # tenant. Drop them rather than risk a cross-tenant hit.
+            self.script_facts.clear()
         self.tenant = qlik_tenant
         self.api_key = qlik_key
         self.output_dir = output_dir

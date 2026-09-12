@@ -42,9 +42,13 @@ import fmt
 import urllib.request
 import urllib.error
 
+import script_cache
 from qlik_core import (normalize_host, list_apps, list_spaces,
-                       fetch_scripts, parse_store_reads, extract_file_refs,
-                       parse_load_tables)
+                       classify_external_load)
+
+# Moved to qlik_core, next to the other load-script parsers, so the script
+# fact cache can reach it without importing this module back.
+_classify_external_load = classify_external_load
 
 try:                                  # reuse qlik_core's date parser if present
     from qlik_core import _parse_dt
@@ -867,6 +871,7 @@ def summarize_consumption(records):
 #  Orphan detection - imports that NO app consumes
 # ============================================================
 def build_consumption_index(tenant, api_key, apps=None, log=print, max_apps=None,
+                            facts_cache=None,
                             should_cancel=None):
     """Open every app, read its load script, and record which data files it
     READS vs PRODUCES. This is what lets us spot imports nothing consumes.
@@ -885,18 +890,21 @@ def build_consumption_index(tenant, api_key, apps=None, log=print, max_apps=None
         apps = apps[:max_apps]
     consumed, produced = set(), set()
     log(f"Reading load scripts of {len(apps)} apps for the consumption index ...")
-    failures = {}
-    scripts = fetch_scripts(tenant, api_key, [a["guid"] for a in apps], log=log,
-                            should_cancel=should_cancel, errors=failures)
+    # Same facts the load-profile pass just computed, so within one capacity
+    # run every script is read once rather than twice.
+    facts = script_cache.get_facts(facts_cache if facts_cache is not None else {},
+                                   tenant, api_key, apps, log=log,
+                                   should_cancel=should_cancel)
     _ck(should_cancel)
+    errors = []
     for a in apps:
-        script = scripts.get(a["guid"])
-        if script:
-            stores, _reads = parse_store_reads(script)          # STORE ... INTO *.qvd
-            produced |= stores
-            consumed |= (extract_file_refs(script) - stores)    # everything read, not written
-    errors = [{"app": a.get("name", ""), "guid": a["guid"], "error": failures[a["guid"]]}
-              for a in apps if a["guid"] in failures]
+        f = facts.get(a["guid"]) or script_cache.UNREADABLE
+        if f["source_kind"] == "unread":
+            errors.append({"app": a.get("name", ""), "guid": a["guid"],
+                           "error": "load script could not be read"})
+            continue
+        produced |= f["stores"]
+        consumed |= f["reads"]
     return {"consumed": consumed, "produced": produced,
             "scripts_read": len(apps) - len(errors), "errors": errors}
 
@@ -966,30 +974,8 @@ def detect_orphans(import_inv, index, exclude_spaces=("Personal",)):
 # ============================================================
 #  External-load detection - does an app actually count?
 # ============================================================
-def _classify_external_load(script):
-    """(loads_external, source_kind) from a load script (best-effort text parse).
-
-    Data for Analysis counts the EXTERNAL data an app ingests. An app that only reads
-    QVDs/files already in Qlik, or binary-loads another app, adds ~0 (its sources are
-    counted elsewhere). A database/SQL source is the clear 'counts' signal.
-      True  -> loads external data (counts toward capacity)
-      False -> QVD/file-only or binary load (~0)
-      None  -> file-based, can't tell from text (review)"""
-    s = script or ""
-    tables = parse_load_tables(s)
-    if any(t.get("kind") == "sql" for t in tables):
-        return True, "external DB (SQL)"
-    if re.search(r"(?im)^\s*binary\b", s):
-        return False, "binary load"
-    froms = [t for t in tables if t.get("kind") == "from"]
-    if not froms:
-        return False, "no external load"
-    if all(all(str(f).endswith(".qvd") for f in (t.get("files") or [])) for t in froms):
-        return False, "QVD/file only"
-    return None, "file-based (review)"
-
-
-def scan_app_load_profiles(tenant, api_key, apps, log=print, max_apps=None, should_cancel=None):
+def scan_app_load_profiles(tenant, api_key, apps, log=print, max_apps=None, should_cancel=None,
+                           facts_cache=None):
     """Read each app's load script ONCE and return its capacity profile:
       {guid: {loads_external, source_kind, creates_export, stores:set, reads:set}}
     - loads_external -> the app contributes to the APP bucket (external data ingest)
@@ -1002,25 +988,19 @@ def scan_app_load_profiles(tenant, api_key, apps, log=print, max_apps=None, shou
     if max_apps:
         items = items[:max_apps]
     log(f"Reading {len(items)} app load scripts (external-load + export profile) ...")
-    scripts = fetch_scripts(tenant, api_key, [a["guid"] for a in items],
-                            log=log, should_cancel=should_cancel)
+    facts = script_cache.get_facts(facts_cache if facts_cache is not None else {},
+                                   tenant, api_key, items, log=log,
+                                   should_cancel=should_cancel)
     _ck(should_cancel)
     out, errors = {}, 0
     for a in items:
         guid = a["guid"]
-        script = scripts.get(guid)
-        if script:
-            ext, kind = _classify_external_load(script)
-            stores, _r = parse_store_reads(script)
-            reads = extract_file_refs(script) - stores
-        else:
-            # None (could not open) and "" (genuinely empty) both leave the
-            # app unclassified, but only the first is an error worth counting.
-            if script is None:
-                errors += 1
-            ext, kind, stores, reads = None, "unread", set(), set()
-        out[guid] = {"loads_external": ext, "source_kind": kind,
-                     "creates_export": bool(stores), "stores": stores, "reads": reads}
+        f = facts.get(guid) or script_cache.UNREADABLE
+        if f["source_kind"] == "unread":
+            errors += 1
+        out[guid] = {"loads_external": f["loads_external"], "source_kind": f["source_kind"],
+                     "creates_export": bool(f["stores"]),
+                     "stores": f["stores"], "reads": f["reads"]}
     if errors:
         log(f"  ({errors} scripts could not be read - those apps show as 'review')")
     return out
@@ -1033,7 +1013,7 @@ def fetch_two_capacities(tenant, api_key, log=print, with_field_detail=True,
                          with_orphans=False, max_dataset_detail=1000,
                          max_orphan_apps=400, exclude_spaces=_DEFAULT_EXCLUDE_SPACES,
                          reloaded_this_month_only=False, with_external_detection=True,
-                         max_external_scan=600, should_cancel=None):
+                         max_external_scan=600, should_cancel=None, facts_cache=None):
     """Gather BOTH capacities in one pass:
       App reload : per-app data-model inventory (proxy) + consumption (authoritative)
       Import     : catalog datasets + data files (proxy) + consumption (authoritative)
@@ -1062,7 +1042,9 @@ def fetch_two_capacities(tenant, api_key, log=print, with_field_detail=True,
         log(f"== LOAD-SCRIPT scan: external-load + export ({scope}) ==")
         targets = sorted(app_inv["apps"], key=lambda a: -(a.get("size_bytes") or 0))
         profiles = scan_app_load_profiles(tenant, api_key, targets, log=log,
-                                          max_apps=max_external_scan, should_cancel=should_cancel)
+                                          max_apps=max_external_scan,
+                                          should_cancel=should_cancel,
+                                          facts_cache=facts_cache)
         for a in app_inv["apps"]:
             p = profiles.get(a.get("guid"))
             if p:
@@ -1110,7 +1092,8 @@ def fetch_two_capacities(tenant, api_key, log=print, with_field_detail=True,
             else:
                 log("== ORPHAN detection: reading app load scripts ==")
                 index = build_consumption_index(tenant, api_key, apps=app_inv["apps"], log=log,
-                                                should_cancel=should_cancel)
+                                                should_cancel=should_cancel,
+                                                facts_cache=facts_cache)
                 index["scripts_total"] = len(app_inv["apps"])
                 imp_section["orphans"] = detect_orphans(imp_inv, index, exclude_spaces=exclude_spaces)
 

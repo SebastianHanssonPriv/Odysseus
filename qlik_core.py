@@ -260,6 +260,29 @@ def list_data_files(tenant, api_key):
 # ============================================================
 #  Core export logic (UI-independent)
 # ============================================================
+def classify_external_load(script):
+    """(loads_external, source_kind) from a load script (best-effort text parse).
+
+    Data for Analysis counts the EXTERNAL data an app ingests. An app that only reads
+    QVDs/files already in Qlik, or binary-loads another app, adds ~0 (its sources are
+    counted elsewhere). A database/SQL source is the clear 'counts' signal.
+      True  -> loads external data (counts toward capacity)
+      False -> QVD/file-only or binary load (~0)
+      None  -> file-based, can't tell from text (review)"""
+    s = script or ""
+    tables = parse_load_tables(s)
+    if any(t.get("kind") == "sql" for t in tables):
+        return True, "external DB (SQL)"
+    if re.search(r"(?im)^\s*binary\b", s):
+        return False, "binary load"
+    froms = [t for t in tables if t.get("kind") == "from"]
+    if not froms:
+        return False, "no external load"
+    if all(all(str(f).endswith(".qvd") for f in (t.get("files") or [])) for t in froms):
+        return False, "QVD/file only"
+    return None, "file-based (review)"
+
+
 SCRIPT_WORKERS = 6          # concurrent engine sessions for a bulk script read
 
 

@@ -41,8 +41,8 @@ built on it, and whether it is still being reloaded. `score_app` combines those
 into a High/Medium/Low tier and reports every component alongside it, so the
 tier is auditable rather than a black box.
 
-This module is pure analysis: no GUI, no network. Callers hand it scripts and
-model data.
+This module is pure analysis: no GUI, no network. Callers hand it the parsed
+script facts and, for the few consuming apps, their model data.
 """
 from __future__ import annotations
 
@@ -178,23 +178,24 @@ def score_app(app):
 
 
 # --------------------------------------------------------------- the scan
-def scan_landed_impact(apps, scripts, read_detail, log=None, cancel_check=None):
+def scan_landed_impact(apps, facts, read_consumer, log=None, cancel_check=None):
     """Build the whole picture.
 
     `apps` is core.list_apps() output, each enriched with space_name and
     (best-effort) published/reloaded.
 
-    `scripts` is {guid: script} for every app, as core.fetch_scripts returns
-    it - already fetched, and fetched concurrently, because every app's script
-    is needed and each one is an independent network round trip. A guid
-    mapping to None means the app could not be opened; a guid mapping to ""
-    is an app whose script is empty, which is a different thing.
+    `facts` is {guid: facts} for every app, as script_cache.get_facts returns
+    it: which QVDs each app writes and reads, already parsed and cached for the
+    session. That is all it takes to work out what the extractors land and who
+    reads it, and it is about 1 MB for a whole tenant rather than tens of MB of
+    raw script.
 
-    `read_detail(guid) -> {model_fields, objects, usage_result} | None` stays
-    a callback because it is the expensive half, and is only needed for an app
-    that actually reads a landed QVD. On a tenant with two thousand apps, most
-    of which read none, fetching the model, every master item, every visual
-    and a full usage analysis for all of them would cost hours for nothing.
+    `read_consumer(guid) -> {script, model_fields, objects, usage_result} |
+    None` is called only for an app that actually reads a landed QVD, because
+    that is the expensive half: the raw script for a field-level parse, plus
+    the model, every master item, every visual and a full usage analysis. On a
+    tenant with two thousand apps, most of which read no landed QVD, doing
+    that for all of them would cost hours for nothing.
 
     Returns {"qvds", "fields", "reach", "consumers", "skipped", "extractors"},
     or None if cancelled.
@@ -216,16 +217,15 @@ def scan_landed_impact(apps, scripts, read_detail, log=None, cancel_check=None):
     for a in extractors:
         if cancel():
             return None
-        script = scripts.get(a["guid"])
-        if script is None:
+        f = facts.get(a["guid"])
+        if f is None or f["source_kind"] == "unread":
             skipped.append({"app": a["name"], "guid": a["guid"], "why": "could not be opened"})
             continue
-        stores, reads = core.parse_store_reads(script)
         # An extractor reading another extractor's QVD still counts as
         # something reading it, so keep these out of the fan-out maps but in
         # the "is anything reading this at all" set.
-        extractor_reads |= reads
-        for q in stores:
+        extractor_reads |= f["reads"]
+        for q in f["stores"]:
             landed.setdefault(q, {"producers": []})["producers"].append(a["name"])
     log(f"{len(landed)} landed QVD(s) written by the extractor apps.")
     if not landed:
@@ -240,21 +240,20 @@ def scan_landed_impact(apps, scripts, read_detail, log=None, cancel_check=None):
     for a in others:
         if cancel():
             return None
-        script = scripts.get(a["guid"])
-        if script is None:
+        f = facts.get(a["guid"])
+        if f is None or f["source_kind"] == "unread":
             skipped.append({"app": a["name"], "guid": a["guid"], "why": "could not be opened"})
             continue
-        stores, reads = core.parse_store_reads(script)
-        produces[a["guid"]] = stores
-        reads_by_guid[a["guid"]] = reads
-        touched = reads & set(landed)
+        produces[a["guid"]] = f["stores"]
+        reads_by_guid[a["guid"]] = f["reads"]
+        touched = f["reads"] & set(landed)
         if not touched:
             continue
 
         # Only now is the expensive half worth fetching.
         log(f"  consumer: {a['name']} ({len(touched)} landed QVD(s))")
-        data = read_detail(a["guid"]) or {}
-        tables = core.parse_load_tables(script)
+        data = read_consumer(a["guid"]) or {}
+        tables = core.parse_load_tables(data.get("script") or "")
         rows = core.analyze_qvd_field_usage(tables, data.get("model_fields") or [])
         usage = data.get("usage_result")
         if usage:
