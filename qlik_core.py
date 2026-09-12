@@ -1279,13 +1279,65 @@ def write_consistency_report(results, measures, dims, out_dir, log):
 DOLLAR_RE = re.compile(r"\$\(([^)]*)\)")
 
 
+def _split_expression(text):
+    """(code, literals) for one expression: the part that executes, and the
+    contents of its string literals. Comments belong to neither and are
+    dropped."""
+    src = text or ""
+    code, lits = [], []
+    i, n = 0, len(src)
+    while i < n:
+        ch = src[i]
+        if ch == "/" and i + 1 < n and src[i + 1] == "/":
+            j = src.find("\n", i)
+            i = n if j == -1 else j + 1
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "*":
+            j = src.find("*/", i + 2)
+            i = n if j == -1 else j + 2
+            continue
+        if ch == "'":                        # a string literal
+            j = src.find("'", i + 1)
+            if j == -1:
+                lits.append(src[i + 1:])
+                break
+            lits.append(src[i + 1:j])
+            code.append(" ")
+            i = j + 1
+            continue
+        code.append(ch)
+        i += 1
+    return "".join(code), " ".join(lits)
+
+
 def _referenced_names(text):
+    """Every name an expression references, lowercased.
+
+    Three things used to count as a reference that are not one: a field named
+    in a `//` or `/* */` comment, and a field whose name happens to appear
+    inside a string literal. `if(Country='Region',1,0)` and `// TODO: add
+    Region later` both marked the field Region as used, so a genuinely unused
+    field could be hidden from the report by a stale comment.
+
+    A comment is dropped outright. A string literal is dropped too, EXCEPT in
+    an expression containing `$(`, where a literal can be assembled into code
+    at run time - there the literal is still harvested, because guessing wrong
+    in that direction would list a live field as a candidate to delete.
+
+    Still deliberately loose in one way: every bare identifier counts, so
+    function names count too, and a field called Year or Date reads as used
+    because `Year(...)` appears in some expression. That makes the report
+    under-report rather than over-report, which is the right way round for a
+    list someone might delete from.
+    """
     names = set()
     if not text:
         return names
-    for b in re.findall(r"\[([^\]]+)\]", text):
+    code, lits = _split_expression(text)
+    harvest = code if "$(" not in text else code + " " + lits
+    for b in re.findall(r"\[([^\]]+)\]", harvest):
         names.add(b.strip().lower())
-    for t in re.findall(r"[A-Za-z_][A-Za-z0-9_.]*", text):
+    for t in re.findall(r"[A-Za-z_][A-Za-z0-9_.]*", harvest):
         names.add(t.lower())
     return names
 
