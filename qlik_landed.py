@@ -52,7 +52,29 @@ import os
 import fmt
 import qlik_core as core
 
-EXTRACTOR_TOKEN = "extractor"        # what marks an app as landing outside data
+# An extractor is identified by what its script DOES, not by what it is called.
+#
+# This used to be `"extractor" in app_name.lower()`, and the failure message
+# told the user to rename their apps to suit the tool. On the real tenant the
+# extracting apps are called things like "ABC Inventory QVD creator [to KPIs]"
+# and "SALES PRICE [QVD creator to OPERATIONAL]", so the whole feature was
+# blind to them: their landed QVDs never entered the report, and they were
+# analysed as though they were reporting apps.
+#
+# The script already tells us, out of facts we have fetched anyway:
+#   stores          - the QVDs it writes. No STORE, nothing landed, not an
+#                     extractor whatever it is called.
+#   loads_external  - True for a SQL/database source, None for a file source
+#                     the text parse cannot pin down (a CSV or Excel drop is
+#                     still data arriving from outside), False for an app that
+#                     only reads QVDs already in Qlik or binary-loads another
+#                     app. Only False disqualifies.
+#
+# Known edge: an app that generates rows with INLINE or AUTOGENERATE and stores
+# them classifies as "no external load" and so is not an extractor. Its data
+# does originate in Qlik, so that is defensible, but it is a judgement rather
+# than a fact.
+_NOT_LANDING = ("QVD/file only", "binary load", "no external load")
 
 # The per-app classification of one field reference, worst-to-best. Ordered so
 # a roll-up across several apps can take the best state any app achieved.
@@ -85,8 +107,20 @@ STATE_HELP = {
 }
 
 
-def is_extractor(name):
-    return EXTRACTOR_TOKEN in (name or "").lower()
+def extractor_reason(f):
+    """Why this app's facts make it an extractor, or "" if they do not.
+
+    The returned string is the evidence, and it goes in the report so the
+    classification can be audited instead of trusted.
+    """
+    if not f or f["source_kind"] == "unread":
+        return ""                       # unknown, not "no" - the caller skips it
+    if not f["stores"]:
+        return ""
+    if f["loads_external"] is False:
+        return ""
+    n = len(f["stores"])
+    return f"{f['source_kind']}, stores {n} QVD{'' if n == 1 else 's'}"
 
 
 def classify(row):
@@ -203,9 +237,16 @@ def scan_landed_impact(apps, facts, read_consumer, log=None, cancel_check=None):
     log = log or (lambda _m: None)
     cancel = cancel_check or (lambda: False)
 
-    extractors = [a for a in apps if is_extractor(a.get("name"))]
-    others = [a for a in apps if not is_extractor(a.get("name"))]
-    log(f"{len(extractors)} extractor app(s), {len(others)} other app(s).")
+    extractors, others, why = [], [], {}
+    for a in apps:
+        reason = extractor_reason(facts.get(a["guid"]))
+        if reason:
+            extractors.append(a)
+            why[a["guid"]] = reason
+        else:
+            others.append(a)
+    log(f"{len(extractors)} extractor app(s) - apps whose script stores a QVD and "
+        f"loads data from outside Qlik - and {len(others)} other app(s).")
     if not extractors:
         return {"qvds": {}, "fields": [], "reach": [], "consumers": [],
                 "skipped": [], "extractors": []}
@@ -230,7 +271,9 @@ def scan_landed_impact(apps, facts, read_consumer, log=None, cancel_check=None):
     log(f"{len(landed)} landed QVD(s) written by the extractor apps.")
     if not landed:
         return {"qvds": landed, "fields": [], "reach": [], "consumers": [],
-                "skipped": skipped, "extractors": [a["name"] for a in extractors]}
+                "skipped": skipped,
+                "extractors": [{"name": a["name"], "guid": a["guid"],
+                                "why": why[a["guid"]]} for a in extractors]}
 
     # --- phase 2: who reads them, and what happens to each field there ---
     reach = []                       # one row per (qvd, field, consuming app)
@@ -378,7 +421,9 @@ def scan_landed_impact(apps, facts, read_consumer, log=None, cancel_check=None):
         })
 
     return {"qvds": qvd_rows, "fields": fields, "reach": reach, "consumers": consumers,
-            "skipped": skipped, "extractors": [a["name"] for a in extractors]}
+            "skipped": skipped,
+            "extractors": [{"name": a["name"], "guid": a["guid"],
+                            "why": why[a["guid"]]} for a in extractors]}
 
 
 # --------------------------------------------------------------- text summary
@@ -386,9 +431,10 @@ def render_text(result):
     if not result:
         return "Scan cancelled."
     if not result["extractors"]:
-        return ("No app on the tenant has \"extractor\" in its name, so there are no landed "
-                "QVDs to report on. Rename the extracting apps, or change EXTRACTOR_TOKEN in "
-                "qlik_landed.py if your convention differs.")
+        return ("No app in scope both stores a QVD and loads data from outside Qlik, so "
+                "there are no landed QVDs to report on. Either the scope holds no "
+                "extracting apps, or their scripts could not be read - check the LOG for "
+                "apps listed as skipped.")
     f = result["fields"]
     impact = sum(1 for r in f if r["has_impact"])
     carried = sum(1 for r in f if r["best_state"] == STATE_IN_MODEL_UNUSED)
@@ -401,7 +447,8 @@ def render_text(result):
     lines = [
         "LANDED QVD FIELD IMPACT",
         "",
-        f"Extractor apps          {len(result['extractors'])}",
+        f"Extractor apps          {len(result['extractors'])}"
+        f"   (stores a QVD and loads from outside Qlik)",
         f"Landed QVDs             {len(result['qvds'])}",
         f"Consuming apps          {len(result['consumers'])}"
         f"   (High {tiers.get('High', 0)} / Medium {tiers.get('Medium', 0)} /"
@@ -462,6 +509,12 @@ _SHEETS = (
                 r.get("downstream_apps", 0), r.get("objects", 0),
                 r.get("landed_fields_used", 0), r.get("landed_fields_reaching", 0),
                 r.get("landed_qvds", 0), r.get("reload_age_days"), r["why"]], "consumers"),
+    # The classification itself is a finding, not a given. An app is in this
+    # report because its script stores a QVD and pulls data from outside Qlik,
+    # and this sheet says so app by app, so a wrong call can be spotted rather
+    # than silently shaping every other sheet.
+    ("Extractor apps", ["App", "GUID", "Why it counts as an extractor"],
+     lambda r: [r["name"], r["guid"], r["why"]], "extractors"),
 )
 
 
@@ -530,6 +583,8 @@ def _summary_rows(result):
         ["Built", datetime.datetime.now().strftime("%Y-%m-%d %H:%M")],
         ["", ""],
         ["Extractor apps", len(result["extractors"])],
+        ["  identified by", "storing a QVD and loading data from outside Qlik, "
+                            "not by app name"],
         ["Landed QVDs", len(result["qvds"])],
         ["Landed QVDs nothing reads", sum(1 for q in result["qvds"] if not q["read_by_apps"])],
         ["Consuming apps", len(result["consumers"])],

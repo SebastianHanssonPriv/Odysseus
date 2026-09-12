@@ -227,10 +227,21 @@ person's account lifecycle is a continuity risk independent of what this
 tool can see.
 
 ### Landed QVD impact
-A "landed" QVD is one written by an app with **extractor** in its name — the apps
-that pull data onto the platform from outside it. This task answers, for every
-field in every landed QVD, what actually depends on it. Tenant-wide, no scope
-needed, but it opens every app, so allow time.
+A "landed" QVD is one written by an **extractor**: an app whose load script both
+`STORE`s a QVD and pulls its data from outside Qlik. Those are the apps that
+bring data onto the platform, and the classification comes from the script, not
+from the app's name — the extracting apps on this tenant are called things like
+"ABC Inventory QVD creator", and a name rule missed them.
+
+The evidence is in the report. The **Extractor apps** sheet lists every app the
+scan classified as an extractor and why, for example `external DB (SQL), stores
+4 QVDs`, so a wrong call can be spotted instead of quietly shaping every other
+sheet. Three script shapes are deliberately *not* extractors: an app that reads
+only QVDs already in Qlik (a transform layer), a `BINARY` load of another app,
+and an app that stores nothing.
+
+This task answers, for every field in every landed QVD, what actually depends on
+it. Tenant-wide, no scope needed, but it opens every app, so allow time.
 
 Each field gets one of five states **per consuming app**:
 
@@ -267,8 +278,9 @@ sheet, so its dependencies are invisible here — personal-space apps owned by
 other people are the usual cause, and **Diagnose visibility** confirms it for a
 given app.
 
-If your extractor apps are named by another convention, change
-`EXTRACTOR_TOKEN` in `qlik_landed.py`.
+An extracting app that does not appear at all is one whose script could not be
+read — it is listed as skipped in the LOG rather than treated as "not an
+extractor", because an unreadable script is unknown, not a no.
 
 ## 3b. Reports
 **Reports** in the nav rail is the library. Every scan, export and analysis

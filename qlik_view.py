@@ -1581,7 +1581,8 @@ class QlikView(QWidget):
                 return
             self.sig_landed_done.emit(landed.render_text(res))
             if not res["extractors"]:
-                self.log('No app has "extractor" in its name - nothing to report.')
+                self.log("No app in scope both stores a QVD and loads data from outside "
+                         "Qlik - nothing landed, so nothing to report.")
                 return
             self.shell.run_step(2, f"{len(res['fields'])} field rows")
             out_path = landed.write_report(res, out_dir, self.shell.sig_log.emit)
