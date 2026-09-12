@@ -9,6 +9,9 @@ probe_qvd_lineage.py
 # The probe's own transcript. It holds no key, but it names internal QVD
 # paths and app GUIDs, so it stays local.
 probe_output.txt
+# Where the probes read the API key from, so it never sits in a script
+# that might get attached to a message.
+qlik_key.txt
 
 __pycache__/
 *.pyc
