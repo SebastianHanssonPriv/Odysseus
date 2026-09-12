@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Iterator
+from typing import TYPE_CHECKING, Iterator
 
-from powerbi_client import PowerBIAdminClient
+# Annotation only, and annotations are strings here - see scanner.py. Imported
+# for real it pulls auth -> azure.identity -> cryptography into a module that
+# builds a date window and pages a JSON feed.
+if TYPE_CHECKING:
+    from powerbi_client import PowerBIAdminClient
 
 
 def _day_window(day: date) -> tuple[str, str]:
