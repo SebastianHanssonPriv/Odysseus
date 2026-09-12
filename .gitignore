@@ -2,6 +2,9 @@
 # pasted into it, so nothing matching this pattern may ever be committed.
 *_probe.py
 *_probe_run.py
+# probe_qvd_lineage.py has a fill-in block for a tenant API key, so it is
+# handed over as a file and never tracked, for the same reason.
+probe_qvd_lineage.py
 
 # The probe's own transcript. It holds no key, but it names internal QVD
 # paths and app GUIDs, so it stays local.
