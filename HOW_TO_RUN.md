@@ -195,7 +195,7 @@ than the report itself), **QVD inventory**, and **Field usage** (now with
 was traced and why it stopped where it did) — and shows a summary in the
 panel below. This walks and fully re-scans every app in the lineage, not just
 the published ones, so it is meaningfully slower than the per-app QVD field
-usage report — expect it to take a while on a large tenant, and note that a
+usage report. It opens every reachable app over the engine, which is the whole cost: on a real tenant the sequential walk took 2-3 hours, and about 40-50 minutes when it did not need the scripts. The walk is breadth-first, so every app at one hop is independent, and a hop's apps are now opened **concurrently** (six at a time, the same setting bulk script reads use). The results are identical rather than merely similar - `tests/test_tenant_walk.py` runs the old sequential implementation verbatim against the new one over the same estate and compares every app, hop depth and field row. Still expect it to take a while on a large tenant, and note that a
 very deep or branching pipeline is capped at 6 hops back from each published
 app: a row still showing "QVD" as its true origin means the chain stopped
 there (no producing app found, that app's own source wasn't resolvable from

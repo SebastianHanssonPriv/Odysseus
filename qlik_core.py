@@ -3014,8 +3014,35 @@ def _resolve_row_origin(qvd, field, tables_by_guid, qvd_producer, title_by_guid,
     return result
 
 
+def _map_io(fn, keys, workers, cancel_check=None):
+    """{key: (result, error)} for an independent I/O call per key, concurrently.
+
+    Each call gets its own everything - open_app_full builds a fresh
+    QlikExporter per guid and closes it, fetch_native_lineage is a stateless
+    GET - which is what makes this safe, the same property fetch_scripts
+    relies on. An exception is captured per key rather than failing the batch,
+    because one unreadable app must not end a tenant walk.
+    """
+    out = {}
+    if not keys:
+        return out
+
+    def one(k):
+        try:
+            return k, fn(k), None
+        except Exception as e:                      # per key, never fatal
+            return k, None, e
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, len(keys))) as pool:
+        for k, res, err in pool.map(one, keys):
+            out[k] = (res, err)
+            if cancel_check and cancel_check():
+                break
+    return out
+
+
 def scan_tenant_lineage(root_apps, open_app_full, fetch_lineage, log=None, max_hops=6,
-                        cancel_check=None):
+                        cancel_check=None, workers=SCRIPT_WORKERS):
     """Full multi-hop QVD + field inventory starting from root_apps
     ([{guid, name, space_id}], the published apps a tenant scan cares about).
     Walks 'which app produces the QVDs I read' backwards via Qlik's own
@@ -3046,47 +3073,77 @@ def scan_tenant_lineage(root_apps, open_app_full, fetch_lineage, log=None, max_h
     seen = set()
     tables_by_guid = {}
     qvd_producer = {}
-    frontier = [(0, a["guid"], a.get("name", ""), a.get("space_id", ""), True) for a in root_apps]
-    while frontier:
+
+    # The walk is breadth-first with a FIFO frontier, so it already processed
+    # every app at one hop before any app at the next. Every app within a hop
+    # is independent, and each open_app_full is a WebSocket session of its own,
+    # so a hop's apps are opened concurrently instead of one at a time. On this
+    # tenant the sequential walk took 2-3 hours, and the dominant cost is
+    # waiting on those sessions: fetch_scripts measured 5.6x at 6 workers doing
+    # exactly this.
+    #
+    # The results are identical rather than merely equivalent. Each hop's apps
+    # are processed in frontier order after the fetches land, so qvd_producer -
+    # which is first-writer-wins, the one order-sensitive structure here -
+    # resolves exactly as it did sequentially.
+    level = [(a["guid"], a.get("name", ""), a.get("space_id", ""), True) for a in root_apps]
+    depth = 0
+    while level and depth <= max_hops:
         if cancel_check and cancel_check():
             if log:
                 log("  lineage walk cancelled.")
             break
-        depth, guid, fallback_name, fallback_space, is_root = frontier.pop(0)
-        if guid in seen or depth > max_hops:
-            continue
-        seen.add(guid)
+        todo = []
+        for guid, fallback_name, fallback_space, is_root in level:
+            if guid in seen:
+                continue
+            seen.add(guid)
+            todo.append((guid, fallback_name, fallback_space, is_root))
+        if not todo:
+            break
+        if log and len(todo) > 1:
+            log(f"  [hop {depth}] opening {len(todo)} app(s), "
+                f"{min(workers, len(todo))} at a time ...")
 
-        info = open_app_full(guid)
-        if not info:
+        opened = _map_io(open_app_full, [t[0] for t in todo], workers, cancel_check)
+        need_lineage = []
+        for guid, fallback_name, fallback_space, is_root in todo:
+            info, err = opened.get(guid, (None, None))
+            if not info:
+                if log:
+                    log(f"  (could not open {fallback_name or guid} - skipped"
+                        + (f": {err}" if err else "") + ")")
+                continue
+            tables = parse_load_tables(info.get("script", ""))
+            tables_by_guid[guid] = tables
+            rows = analyze_qvd_field_usage(tables, info.get("model_fields", []))
+            if info.get("usage_result"):
+                attach_report_usage(rows, info["usage_result"])
+            title = info.get("title") or fallback_name or guid
+            apps[guid] = {"title": title,
+                          "space_id": info.get("space_id") or fallback_space or "",
+                          "is_root": is_root, "depth": depth, "rows": rows}
+            qvds = {r["qvd_file"] for r in rows}
             if log:
-                log(f"  (could not open {fallback_name or guid} - skipped)")
-            continue
+                log(f"  [hop {depth}] {title}: {len(qvds)} QVD(s), "
+                    f"{len(rows)} field reference(s)")
+            if depth < max_hops and qvds:
+                need_lineage.append((guid, title, qvds))
 
-        tables = parse_load_tables(info.get("script", ""))
-        tables_by_guid[guid] = tables
-        rows = analyze_qvd_field_usage(tables, info.get("model_fields", []))
-        if info.get("usage_result"):
-            attach_report_usage(rows, info["usage_result"])
-        title = info.get("title") or fallback_name or guid
-        apps[guid] = {"title": title, "space_id": info.get("space_id") or fallback_space or "",
-                     "is_root": is_root, "depth": depth, "rows": rows}
-        qvds = {r["qvd_file"] for r in rows}
-        if log:
-            log(f"  [hop {depth}] {title}: {len(qvds)} QVD(s), {len(rows)} field reference(s)")
-
-        if depth >= max_hops or not qvds:
-            continue
-        try:
-            graph = fetch_lineage(guid)
-        except Exception as e:
-            if log:
-                log(f"  (native lineage unavailable for {title}: {e})")
-            continue
-        for prod in native_producer_apps(graph, qvds):
-            qvd_producer.setdefault(prod["qvd"].lower(), prod["guid"])
-            if prod["guid"] not in seen:
-                frontier.append((depth + 1, prod["guid"], prod.get("label", ""), "", False))
+        graphs = _map_io(fetch_lineage, [g for g, _t, _q in need_lineage], workers, cancel_check)
+        nxt = []
+        for guid, title, qvds in need_lineage:
+            graph, err = graphs.get(guid, (None, None))
+            if graph is None:
+                if log:
+                    log(f"  (native lineage unavailable for {title}: {err})")
+                continue
+            for prod in native_producer_apps(graph, qvds):
+                qvd_producer.setdefault(prod["qvd"].lower(), prod["guid"])
+                if prod["guid"] not in seen:
+                    nxt.append((prod["guid"], prod.get("label", ""), "", False))
+        level = nxt
+        depth += 1
 
     title_by_guid = {g: v["title"] for g, v in apps.items()}
     memo = {}

@@ -47,6 +47,7 @@ COVERS = {
     "test_scan_coverage": "a partly-scanned tenant does not read as a whole one",
     "test_case_collision": "two fields differing only in case do not cancel out",
     "test_docs": "CLAUDE.md does not describe code that no longer exists",
+    "test_tenant_walk": "the concurrent tenant walk gives identical results, faster",
 }
 
 
