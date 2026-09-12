@@ -974,7 +974,11 @@ class QlikView(QWidget):
             self.cap_dash.addWidget(note)
 
         # KPI row
-        dup_reclaim = sum(c.get("dedupe_savings_bytes", 0) for c in arr.get("duplicate_app_clusters", []))
+        # The full-tenant total, not the sum of the top-N clusters shown below.
+        dup_reclaim = arr.get("dedupe_savings_total_bytes")
+        if dup_reclaim is None:      # a capacity result from before this was computed
+            dup_reclaim = sum(c.get("dedupe_savings_bytes", 0)
+                              for c in arr.get("duplicate_app_clusters", []))
         spaces_billable = [s for s in arr.get("space_usage", []) if s.get("billable")]
         top_space = spaces_billable[0] if spaces_billable else None
         specs = [

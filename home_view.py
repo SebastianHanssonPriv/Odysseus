@@ -119,7 +119,11 @@ class HomeView(QWidget):
                       status)
             lay.addWidget(meter)
 
-        dup_reclaim = sum(c.get("dedupe_savings_bytes", 0) for c in arr.get("duplicate_app_clusters", []))
+        # The full-tenant total, not the sum of the top-N clusters charted below.
+        dup_reclaim = arr.get("dedupe_savings_total_bytes")
+        if dup_reclaim is None:      # a capacity result from before this was computed
+            dup_reclaim = sum(c.get("dedupe_savings_bytes", 0)
+                              for c in arr.get("duplicate_app_clusters", []))
         spaces_billable = [s for s in arr.get("space_usage", []) if s.get("billable")]
         specs = [
             ("Billable app data", human_bytes(persum.get("billable_bytes", 0)),

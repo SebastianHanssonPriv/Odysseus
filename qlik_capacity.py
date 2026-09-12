@@ -442,6 +442,14 @@ def analyze_capacity(inv, top_n=25, stale_days=120, shared_min_apps=3, recent_da
                          for g in sorted(group, key=lambda g: -g["size_bytes"])],
             })
     duplicate_clusters.sort(key=lambda c: -c["dedupe_savings_bytes"])
+    # Totals are computed HERE, over every cluster, because the list returned
+    # below is truncated to top_n for display. Three call sites - the Home
+    # dashboard, the Qlik capacity dashboard and the workbook summary - summed
+    # dedupe_savings_bytes over that truncated list and labelled the result a
+    # total, so a tenant with more than top_n duplicated reports had its
+    # headline reclaim figure quietly cut off at the 25th cluster.
+    dedupe_total = sum(c["dedupe_savings_bytes"] for c in duplicate_clusters)
+    dedupe_cluster_count = len(duplicate_clusters)
 
     # "What just changed?" view: apps created recently, flagged when they belong to
     # a duplicate set — a freshly rolled-out report copied across many spaces is the
@@ -552,6 +560,9 @@ def analyze_capacity(inv, top_n=25, stale_days=120, shared_min_apps=3, recent_da
         "high_cardinality_fields": high_card,
         "stale_large_apps": stale[:top_n],
         "duplicate_app_clusters": duplicate_clusters[:top_n],
+        # Over every cluster, not just the ones listed above.
+        "dedupe_savings_total_bytes": dedupe_total,
+        "duplicate_cluster_count": dedupe_cluster_count,
         "recent_large_apps": recent_large[:top_n],
         "space_usage": space_usage,          # full list (one row per space)
         "personal_summary": personal_summary,
@@ -1295,8 +1306,12 @@ def write_capacity_report(result, out_dir, log=print):
         [f"Excluded - Personal only ({persum.get('app_count', 0)}) (MB)",
          mb(persum.get('bytes', 0))],
         ["Apps sized (all)", ai.get("totals", {}).get("sized_app_count")],
-        ["Duplicate-report reclaim if consolidated (MB)",
-         mb(sum(c.get("dedupe_savings_bytes", 0) for c in arr.get("duplicate_app_clusters", [])))],
+        # Over every duplicate cluster, not the top-N the Duplicates sheet lists.
+        [f"Duplicate-report reclaim if consolidated, "
+         f"{arr.get('duplicate_cluster_count', 0)} cluster(s) (MB)",
+         mb(arr.get("dedupe_savings_total_bytes",
+                    sum(c.get("dedupe_savings_bytes", 0)
+                        for c in arr.get("duplicate_app_clusters", []))))],
         ["", ""],
         ["== IMPORT-SIDE PROXY ==", ""],
         ["Catalog datasets sized, all spaces (MB)", mb(ii.get("totals", {}).get("dataset_bytes"))],
