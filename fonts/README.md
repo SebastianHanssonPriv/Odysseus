@@ -27,10 +27,17 @@ three static `.ttf` files above out of the zip, and ignore the variable-font ver
 
 **Barlow and Barlow Condensed are two different families, from two different
 downloads.** `Barlow-SemiBold.ttf` is not a substitute for
-`BarlowCondensed-SemiBold.ttf`, and renaming it will not work: the family name
-is recorded inside the file, so a renamed `Barlow-SemiBold.ttf` still registers
-as the family "Barlow SemiBold" and every heading keeps falling back to Segoe UI
-while looking as though the font was installed.
+`BarlowCondensed-SemiBold.ttf`, and renaming it will not work: the family names
+are recorded inside the file, so a renamed Barlow weight still registers under
+the Barlow family and every heading keeps falling back to Segoe UI while looking
+as though the font was installed.
+
+A Google Fonts static `.ttf` carries two family names — the legacy one (name ID
+1, e.g. `Barlow Condensed SemiBold`) and the typographic one (ID 16, e.g.
+`Barlow Condensed`) — and Qt registers **both**. So the correct file supplies
+the `Barlow Condensed` the stylesheets ask for even though its ID 1 says
+otherwise. Worth knowing, because reading only ID 1 makes a correct file look
+wrong.
 
 To check what is actually in this folder:
 
@@ -38,8 +45,9 @@ To check what is actually in this folder:
 python tests\test_fonts.py
 ```
 
-It reads the family name out of each `.ttf` and reports which of the two
-families the stylesheets need are missing, and what falls back without them.
+It reads both family names out of each `.ttf`, cross-checks against what Qt
+actually registers, and reports which of the two families the stylesheets need
+are missing and what falls back without them.
 
 ## What happens if they are missing
 

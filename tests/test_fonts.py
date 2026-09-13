@@ -19,8 +19,19 @@ sys.path.insert(0, str(ROOT))
 REQUIRED = ("Barlow", "Barlow Condensed")
 
 
-def family_of(path):
-    """name table id 1 (family) of a TrueType file."""
+def families_of(path):
+    """Every family name a TrueType file registers, the way Qt sees them.
+
+    Name ID 1 is the legacy family and ID 16 the typographic family. Google
+    Fonts ships each static weight with ID 1 = "Barlow Condensed SemiBold" and
+    ID 16 = "Barlow Condensed", and Qt registers BOTH - verified against
+    QFontDatabase.applicationFontFamilies, which returns
+    ['Barlow Condensed', 'Barlow Condensed SemiBold'] for that file.
+
+    The first version of this check read ID 1 alone and declared the correct
+    file wrong. A check that cries wolf on a good file is worse than no check:
+    it is the one result nobody believes the second time.
+    """
     d = path.read_bytes()
     n_tables = struct.unpack(">H", d[4:6])[0]
     off = None
@@ -32,17 +43,18 @@ def family_of(path):
     if off is None:
         return None
     count, str_off = struct.unpack(">HH", d[off + 2:off + 6])
+    found = set()
     for i in range(count):
         r = off + 6 + i * 12
         plat, enc, lang, nid, ln, so = struct.unpack(">HHHHHH", d[r:r + 12])
-        if nid != 1:
+        if nid not in (1, 16):
             continue
         raw = d[off + str_off + so: off + str_off + so + ln]
         try:
-            return raw.decode("utf-16-be") if plat == 3 else raw.decode("latin-1")
+            found.add(raw.decode("utf-16-be") if plat == 3 else raw.decode("latin-1"))
         except Exception:
             continue
-    return None
+    return found
 
 
 ttfs = sorted((ROOT / "fonts").glob("*.ttf"))
@@ -51,12 +63,33 @@ if not ttfs:
     print("  See fonts/README.md. Not a failure: shipping without them is a choice.")
     sys.exit(0)
 
-print(f"  {'file':34} family")
+print(f"  {'file':34} families it registers")
 families = set()
 for p in ttfs:
-    fam = family_of(p)
-    families.add(fam)
-    print(f"  {p.name:34} {fam}")
+    fams = families_of(p)
+    families |= fams
+    print(f"  {p.name:34} {', '.join(sorted(fams))}")
+
+# Qt is the authority here, so cross-check against it when it is importable.
+# If these two ever disagree, the struct reader is the one that is wrong.
+try:
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtGui import QFontDatabase
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    _app = QApplication.instance() or QApplication([])
+    qt_families = set()
+    for p in ttfs:
+        fid = QFontDatabase.addApplicationFont(str(p))
+        if fid != -1:
+            qt_families.update(QFontDatabase.applicationFontFamilies(fid) or [])
+    print()
+    print(f"  Qt registers     : {sorted(qt_families)}")
+    if qt_families != {f for f in families if f}:
+        print(f"  NOTE  the file read and Qt disagree; Qt is what the app uses.")
+        families = qt_families
+except Exception as e:
+    print(f"  (Qt cross-check unavailable: {type(e).__name__})")
 
 missing = [f for f in REQUIRED if f not in families]
 print()
