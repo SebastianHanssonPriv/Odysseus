@@ -49,6 +49,7 @@ COVERS = {
     "test_docs": "CLAUDE.md does not describe code that no longer exists",
     "test_tenant_walk": "the concurrent tenant walk gives identical results, faster",
     "test_fonts": "fonts/ supplies the families the stylesheets ask for",
+    "test_denied": "a key that cannot read scripts stops the scan, not the reader",
 }
 
 

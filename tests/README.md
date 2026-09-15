@@ -51,6 +51,7 @@ python tests\test_parser.py
 | `test_docs` | CLAUDE.md is the rule sheet future work reads first, so a rule naming a renamed or deleted function sends the reader after something that is not there. Caught a real drift the day it was written. |
 | `test_tenant_walk` | The tenant walk opened one app at a time: 2-3 hours on the real tenant. It is now concurrent per hop, and this compares it against the old sequential implementation run verbatim over the same 12-app, three-hop estate - including the first-writer-wins case where two staging apps produce the same QVD. |
 | `test_fonts` | A file loading is not evidence that the family the stylesheets need exists: family names live inside the font, so a renamed weight registers under the wrong family and every heading falls back silently. Reads both name IDs (1 and 16 - Google Fonts puts the real family in 16) and cross-checks against Qt. Exits 2 (**warn**) when a family is absent, because that is actionable but not a code regression. |
+| `test_denied` | An API key that can open apps but not read their scripts made a real run print ~1,900 near-identical "Access denied" lines across 3,816 engine sessions, then conclude "no app stores a QVD". It now stops after 30, groups the failures, names the cause, and says a script could not be read rather than that nothing is landed. |
 | `test_shell_cache` | The tenant data-file inventory costs one call per space now, so it is fetched once per session and dropped when the tenant changes. |
 
 ## Three outcomes, not two

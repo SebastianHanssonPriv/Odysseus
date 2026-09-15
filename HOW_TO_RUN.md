@@ -603,6 +603,16 @@ at startup.
 ---
 
 ## 7. Good to know
+- **"Access denied" on every script means the key, not the apps.** Reading a
+  load script over the Engine API needs more than the right to open an app: the
+  key's user needs a **Professional** entitlement and **edit-level** access to
+  the space the app lives in, and a published app in a **Managed** space has a
+  locked script that refuses regardless. A tenant-wide scan now stops after 30
+  consecutive denials rather than working through two thousand apps to reach the
+  same conclusion, groups the failures instead of printing one line each, and
+  says a script could not be read rather than that nothing is landed. Use
+  **Diagnose visibility** on a single app GUID to see what the key can actually
+  do before re-running.
 - **Run the tests after changing anything analytical.**
   ```bat
   python tests\run_all.py

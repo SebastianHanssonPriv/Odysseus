@@ -253,6 +253,22 @@ def scan_landed_impact(apps, facts, read_consumer, log=None, cancel_check=None):
     log = log or (lambda _m: None)
     cancel = cancel_check or (lambda: False)
 
+    # "No extractor found" and "no script could be read" are different
+    # findings, and the second one used to be reported as the first. A run
+    # where every script was denied would have said "no app in scope both
+    # stores a QVD and loads data from outside Qlik", which reads as a fact
+    # about the tenant when it is a fact about the API key.
+    readable = sum(1 for a in apps
+                   if (facts.get(a["guid"]) or {}).get("source_kind") != "unread")
+    if apps and not readable:
+        log(f"None of the {len(apps)} app(s) would give up its load script, so nothing "
+            f"can be said about what is landed. See the read failures above: this is "
+            f"about what the API key is allowed to do, not about the apps.")
+        return {"qvds": {}, "fields": [], "reach": [], "consumers": [],
+                "skipped": [{"app": a.get("name", ""), "guid": a["guid"],
+                             "why": "load script could not be read"} for a in apps],
+                "extractors": [], "no_scripts_readable": True}
+
     extractors, others, why = [], [], {}
     for a in apps:
         reason = extractor_reason(facts.get(a["guid"]))
@@ -455,6 +471,16 @@ def scan_landed_impact(apps, facts, read_consumer, log=None, cancel_check=None):
 def render_text(result):
     if not result:
         return "Scan cancelled."
+    if result.get("no_scripts_readable"):
+        return ("NO LOAD SCRIPT COULD BE READ.\n\n"
+                f"{len(result['skipped'])} app(s) were listed and every one refused to "
+                "give up its load script, so this report has nothing to work from. That "
+                "is a permissions result, not a finding about the tenant: reading a "
+                "script over the Engine API needs a Professional entitlement and "
+                "edit-level access to the space, and a published app in a Managed space "
+                "has a locked script that will refuse regardless.\n\n"
+                "Run Diagnose visibility against one app GUID to see exactly what this "
+                "key can do, then re-run this once a script read succeeds.")
     if not result["extractors"]:
         return ("No app in scope both stores a QVD and loads data from outside Qlik, so "
                 "there are no landed QVDs to report on. Either the scope holds no "

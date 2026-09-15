@@ -407,6 +407,23 @@ SCRIPT_WORKERS = 6          # concurrent engine sessions for a bulk script read,
                             # and concurrent REST reads where the same applies
 
 
+# An error that will read the same on every retry and for every app. Retrying
+# one is pure cost, and a run where the first few dozen all fail this way is
+# telling you something about the key, not about the apps.
+_PERMANENT_READ_ERRORS = ("access denied", "forbidden", "unauthorized",
+                          "not authorized", "app not found", "resource not found")
+
+# How many completed reads to judge a run by before calling it systemic. All of
+# them must have failed permanently and none succeeded, which on a tenant of
+# any size is not a coincidence.
+SYSTEMIC_FAILURE_AFTER = 30
+
+
+def _is_permanent_read_error(msg):
+    m = (msg or "").lower()
+    return any(p in m for p in _PERMANENT_READ_ERRORS)
+
+
 def fetch_scripts(tenant, api_key, guids, workers=SCRIPT_WORKERS, log=None,
                   should_cancel=None, on_progress=None, errors=None):
     """Read many apps' load scripts. Returns {guid: script} - a guid maps to
@@ -436,9 +453,41 @@ def fetch_scripts(tenant, api_key, guids, workers=SCRIPT_WORKERS, log=None,
     if not guids:
         return out
 
+    # Failure reporting is aggregated on purpose. One line per failure meant a
+    # real run printed roughly 1,900 near-identical "Access denied" lines,
+    # which buried the one fact that mattered - that NO script was readable -
+    # under its own repetition, and left the reader to cancel a scan that was
+    # never going to produce anything.
+    state = {"ok": 0, "failed": 0, "shown": 0, "systemic": None}
+    tally = {}
+    SHOW_FIRST = 5
+
+    def record_failure(guid, msg):
+        state["failed"] += 1
+        tally[msg] = tally.get(msg, 0) + 1
+        if errors is not None:
+            errors[guid] = msg
+        if state["shown"] < SHOW_FIRST:
+            state["shown"] += 1
+            log(f"  (could not read {guid}: {msg})")
+        elif state["shown"] == SHOW_FIRST:
+            state["shown"] += 1
+            log("  (further read failures are counted, not listed one by one)")
+        # All of the first N attempts failed the same permanent way and none
+        # succeeded: stop, because the remaining 1,800 will say the same thing.
+        if (state["systemic"] is None and state["ok"] == 0
+                and state["failed"] >= SYSTEMIC_FAILURE_AFTER
+                and all(_is_permanent_read_error(m) for m in tally)):
+            state["systemic"] = max(tally, key=tally.get)
+
+    def stop_now():
+        return bool(state["systemic"]) or bool(should_cancel and should_cancel())
+
     def one(guid):
-        for attempt in range(2):          # one retry for a transient blip
-            if should_cancel and should_cancel():
+        # A permanent error is not retried: it costs a second session per app
+        # to be told the same thing. Only a transient one gets the retry.
+        for attempt in range(2):
+            if stop_now():
                 return None
             exp = QlikExporter(tenant, api_key, guid, "", log=lambda *_: None)
             try:
@@ -446,11 +495,10 @@ def fetch_scripts(tenant, api_key, guids, workers=SCRIPT_WORKERS, log=None,
                 h = exp.call(-1, "OpenDoc", [guid])["qReturn"]["qHandle"]
                 return exp.fetch_script(h) or ""
             except Exception as e:
-                if attempt == 1:
-                    msg = str(getattr(e, "reason", e))[:200]
-                    if errors is not None:
-                        errors[guid] = msg
-                    log(f"  (could not read {guid}: {msg})")
+                msg = str(getattr(e, "reason", e))[:200]
+                if attempt == 1 or _is_permanent_read_error(msg):
+                    record_failure(guid, msg)
+                    return None
             finally:
                 exp.close()
         return None
@@ -463,22 +511,42 @@ def fetch_scripts(tenant, api_key, guids, workers=SCRIPT_WORKERS, log=None,
             try:
                 out[guid] = fut.result()
             except Exception as e:        # a task must never take the run down
-                msg = str(getattr(e, "reason", e))[:200]
-                if errors is not None:
-                    errors[guid] = msg
-                log(f"  (script read failed for {guid}: {msg})")
+                record_failure(guid, str(getattr(e, "reason", e))[:200])
                 out[guid] = None
+            else:
+                if out.get(guid) is not None:
+                    state["ok"] += 1
             done += 1
             if on_progress:
                 on_progress(done, len(guids))
             if done % 100 == 0:
                 log(f"  ... {done}/{len(guids)} scripts")
-            if should_cancel and should_cancel():
+            if stop_now():
                 # Stop handing out new work; sessions already open finish and
                 # close cleanly rather than being abandoned mid-call.
                 for f in futures:
                     f.cancel()
                 break
+
+    if state["failed"]:
+        log(f"  {state['ok']} of {len(guids)} script(s) read; {state['failed']} failed:")
+        for msg, n in sorted(tally.items(), key=lambda kv: -kv[1])[:6]:
+            log(f"    {n:5} x  {msg}")
+    if state["systemic"]:
+        # Count the attempts, not the collected results: the abort fires inside
+        # the workers, so `done` lags behind what was actually tried.
+        tried = state["failed"] + state["ok"]
+        log("")
+        log(f"  STOPPED after {tried} app(s): every attempt failed the same way and none "
+            f"succeeded, so the remaining {max(0, len(guids) - tried)} would too.")
+        log(f"  {state['systemic']}")
+        log("  This is about the API key's permissions, not the apps. Reading a load "
+            "script over the Engine API needs more than the right to open an app: the "
+            "key's user needs a Professional entitlement and edit-level access to the "
+            "space the app lives in. A published app in a Managed space has a locked "
+            "script and will refuse regardless.")
+        log("  Use Diagnose visibility on one app GUID to confirm what this key can and "
+            "cannot do before re-running a tenant-wide scan.")
     return out
 
 
